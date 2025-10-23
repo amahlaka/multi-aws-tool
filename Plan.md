@@ -10,7 +10,7 @@
     - account-file (a json file path for storing accounts and roles)
     - region
     - output
-        - pattern (%a for accountid, %A for account name, %c for commandname, %d for date, %t for time, %s for timestamp. for example "%A-%c-%d" results in accountName-sts_get-caller-identity-23.10.2025)
+        - pattern (!a for accountid, !A for account name, !c for commandname, !d for date, !t for time, !s for timestamp. for example "!A-!c-!d" results in accountName-sts_get-caller-identity-23.10.2025)
         - format (output file format, default: json, used as the file format for the saved file)
         - path (path to save the files in, default ~/.multi-aws/outputs/)
     - execution
