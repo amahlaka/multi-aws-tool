@@ -364,7 +364,7 @@ sso_registration_scopes = sso:account:access
             for account in disabled_accounts:
                 click.echo(f"  • {account.id} - {account.name}")
         
-        click.echo(f"\n💾 Account data saved to: {account_manager.data_manager.account_file}")
+        click.echo(f"\n💾 Account data saved to: {account_manager.data_manager.file_path}")
         click.echo(f"\n🚀 Next steps:")
         click.echo(f"  1. Run 'python main.py roles --accounts <account-ids>' to fetch available roles")
         click.echo(f"  2. Run 'python main.py profiles --accounts <account-ids> --role <role-name>' to generate profiles")
@@ -429,7 +429,7 @@ def roles(ctx, accounts):
             for account_id in failed_accounts:
                 click.echo(f"  • {account_id}")
         
-        click.echo(f"\n💾 Role data saved to: {account_manager.data_manager.account_file}")
+        click.echo(f"\n💾 Role data saved to: {account_manager.data_manager.file_path}")
         click.echo(f"\n🚀 Next step:")
         click.echo(f"  Run 'python main.py profiles --accounts <account-ids> --role <role-name>' to generate profiles")
         
@@ -505,7 +505,7 @@ def profiles(ctx, accounts, role, region, format, output_file, append_to_config)
                 click.echo(f"   Creating profile: {profile_name} (from account: {account.name})")
                 
                 profiles_data.append(f"[profile {profile_name}]")
-                profiles_data.append(f"sso_session = {account_manager.sso_session}")
+                profiles_data.append(f"sso_session = {account_manager.sso_client.sso_session_name}")
                 profiles_data.append(f"sso_account_id = {account.id}")
                 profiles_data.append(f"sso_role_name = {role}")
                 profiles_data.append(f"region = {config_region}")
@@ -794,7 +794,7 @@ def sync(ctx, dry_run):
                 try:
                     account_manager.data_manager.save_accounts(account_collection)
                     click.echo(f"\n✅ Successfully updated {updates_made} account(s)")
-                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.account_file}")
+                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.file_path}")
                 except Exception as e:
                     click.echo(f"❌ Failed to save account data: {e}", err=True)
                     return
@@ -863,7 +863,7 @@ def sanitize_names(ctx, dry_run):
                 try:
                     account_manager.data_manager.save_accounts(account_collection)
                     click.echo(f"\n✅ Successfully sanitized {updates_made} account name(s)")
-                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.account_file}")
+                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.file_path}")
                 except Exception as e:
                     click.echo(f"❌ Failed to save account data: {e}", err=True)
                     return
