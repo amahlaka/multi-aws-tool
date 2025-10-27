@@ -21,6 +21,7 @@ wheels/
 *.egg
 MANIFEST
 misc/
+test_output/
 # Virtual Environment
 venv/
 env/
@@ -66,3 +67,4 @@ errors/
 config.ini
 *.key
 *.pem
+*.txt

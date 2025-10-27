@@ -449,7 +449,7 @@ def roles(ctx, accounts):
 @click.pass_context
 def profiles(ctx, accounts, role, region, format, output_file, append_to_config):
     """Generate AWS CLI profiles for specified accounts and role"""
-    click.echo(f"� Generating {format} profiles for role '{role}'")
+    click.echo(f"🔧 Generating {format} profiles for role '{role}'")
     
     try:
         from datetime import datetime
@@ -1328,91 +1328,6 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout):
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
         logger.exception("Unexpected error during command execution")
-
-@cli.command('parse-iam-reports')
-@click.option('--summary-file', '-s', type=click.Path(exists=True), 
-              help='Path to execution summary JSON file containing IAM credential report commands')
-@click.option('--inactive-days', '-d', type=int, default=90, 
-              help='Number of days to consider credentials inactive (default: 90)')
-@click.option('--output', '-o', type=click.Path(), 
-              help='Output file path for parsed report (optional)')
-@click.option('--format', 'output_format', type=click.Choice(['json', 'yaml', 'table']), 
-              default='table', help='Output format (default: table)')
-@click.pass_context
-def parse_iam_reports(ctx, summary_file, inactive_days, output, output_format):
-    """Parse IAM credential reports from execution summary files"""
-    
-    try:
-        import json
-        from datetime import datetime
-        from utils.report_parser import (
-            parse_iam_report, 
-            extract_user_credentials, 
-            summarize_inactive_credentials,
-            generate_credential_report_summary,
-            process_multi,
-            load_from_summary
-        )
-        from models.result import ExecutionSummary, CommandResult
-        
-        # Auto-detect latest summary file if not provided
-        if not summary_file:
-            outputs_dir = Path("outputs")
-            if outputs_dir.exists():
-                summary_files = list(outputs_dir.glob("execution_summary_*.json"))
-                if summary_files:
-                    # Get the most recent summary file
-                    summary_file = max(summary_files, key=lambda f: f.stat().st_mtime)
-                    click.echo(f"📄 Using latest summary file: {summary_file}")
-                else:
-                    click.echo("❌ No execution summary files found in outputs/ directory", err=True)
-                    return
-            else:
-                click.echo("❌ outputs/ directory not found", err=True)
-                return
-        
-        # Load execution summary
-        res = load_from_summary(summary_file)
-        reports = []
-        for ac in res:
-            print(ac["account_id"])
-            print(len(ac["report"]["Users"]))
-            creds = extract_user_credentials(ac["report"])
-            print(creds)
-            inactive_summary = summarize_inactive_credentials(creds, inactive_days)
-            print(inactive_summary)
-            report_summary = generate_credential_report_summary(
-                creds,
-                account_id=ac["account_id"],
-                account_name = get_account_name(ctx, ac["account_id"]),
-                inactive_summary=inactive_summary,
-                inactive_days=inactive_days
-            )
-            reports.append(report_summary)
-
-        # Output results
-        if output:
-            output_path = Path(output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, 'w') as f:
-                if output_format == 'json':
-                    json.dump([r.to_dict() for r in reports], f, indent=2)
-                elif output_format == 'yaml':
-                    import yaml
-                    yaml.dump([r.to_dict() for r in reports], f)
-                else:
-                    f.write('\n\n'.join(r.to_table() for r in reports))
-            click.echo(f"💾 Parsed report saved to: {output_path}")
-        else: #pretty print
-            for report in reports:
-                print("Account:", report.account_name, "(", report.account_id, ")")
-                print("Inactive Credentials (> {} days):".format(inactive_days))
-
-
-    except Exception as e:
-        click.echo(f"❌ Error loading summary file: {e}", err=True)
-        print(e)
-        return
 
 
 @cli.command()

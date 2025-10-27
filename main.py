@@ -12,5 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from cli.commands import cli
 
-if __name__ == '__main__':
+def main():
+    """Main entry point for the multi-aws-tool command"""
     cli()
+
+if __name__ == '__main__':
+    main()

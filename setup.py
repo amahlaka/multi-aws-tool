@@ -19,7 +19,8 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/MultiAWSTool",
-    packages=find_packages(),
+    packages=find_packages(include=['src', 'src.*']),
+    package_dir={'': '.'},
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -35,7 +36,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "multi-aws-tool=src.cli.commands:cli",
+            "multi-aws-tool=main:main",
         ],
     },
 )
