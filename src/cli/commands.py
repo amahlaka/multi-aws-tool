@@ -7,6 +7,11 @@ import logging
 import sys
 from pathlib import Path
 
+# Import dependencies at module level
+from config.manager import load_or_create_config, ConfigurationError
+from aws.account_manager import AccountManager, AccountManagerError
+from utils.validators import parse_account_list
+
 # Setup basic logging
 logging.basicConfig(
     level=logging.INFO,
@@ -16,14 +21,114 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+class AppContext:
+    """Application context to hold shared objects"""
+    def __init__(self):
+        self.config_manager = None
+        self.account_manager = None
+        self.verbose = False
+
+    def initialize(self, verbose=False):
+        """Initialize the application context"""
+        self.verbose = verbose
+        
+        try:
+            # Load configuration
+            self.config_manager = load_or_create_config()
+            
+            # Get config values
+            sso_session = self.config_manager.get('general', 'sso-session', 'default')
+            region = self.config_manager.get('general', 'region', 'us-east-1')
+            account_file = self.config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
+            
+            # Initialize account manager
+            self.account_manager = AccountManager(sso_session, region, account_file)
+            
+            if verbose:
+                logger.debug(f"Initialized with SSO session: {sso_session}, region: {region}")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize application context: {e}")
+            raise
+
+    def ensure_authenticated(self):
+        """Ensure the account manager is authenticated"""
+        if not self.account_manager:
+            raise AccountManagerError("Account manager not initialized")
+            
+        if not self.account_manager.is_authenticated():
+            click.echo("🔐 Authenticating with AWS SSO...")
+            if not self.account_manager.authenticate():
+                raise AccountManagerError("SSO authentication failed")
+        return True
+
+
+def get_account_manager(ctx):
+    """Get or initialize the account manager from context"""
+    if not ctx.obj.account_manager:
+        try:
+            ctx.obj.initialize(verbose=ctx.obj.verbose)
+        except Exception as e:
+            raise click.ClickException(f"Failed to initialize account manager: {e}")
+    return ctx.obj.account_manager
+
+
+def get_account_name(ctx, account_id):
+    """
+    Get account name from account ID using the shared account manager.
+    
+    Args:
+        ctx: Click context containing the account manager
+        account_id: AWS account ID to look up
+        
+    Returns:
+        str: Account name if found, otherwise returns the account ID
+    """
+    try:
+        account_manager = get_account_manager(ctx)
+        account = account_manager.get_account(account_id)
+        if account and account.name:
+            return account.name
+        return account_id  # Return ID if name not found
+    except Exception:
+        return account_id  # Return ID if any error occurs
+
+
+def sanitize_profile_name_component(name: str) -> str:
+    """
+    Sanitize a name component for use in AWS profile names.
+    
+    AWS profile names should contain only alphanumeric characters, hyphens, and underscores.
+    This function replaces spaces and other problematic characters with hyphens.
+    """
+    # Replace spaces, dots, and underscores with hyphens
+    sanitized = name.replace(' ', '-').replace('_', '-').replace('.', '-')
+    # Remove any characters that aren't alphanumeric or hyphens
+    sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '-')
+    # Remove consecutive hyphens and ensure no leading/trailing hyphens
+    sanitized = '-'.join(filter(None, sanitized.split('-')))
+    return sanitized
+
 @click.group()
 @click.version_option(version="0.1.0")
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
-def cli(verbose):
+@click.pass_context
+def cli(ctx, verbose):
     """MultiAWSTool - Multi-AWS Account Management Tool"""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose mode enabled")
+    
+    # Initialize application context
+    ctx.ensure_object(AppContext)
+    try:
+        ctx.obj.initialize(verbose=verbose)
+    except Exception as e:
+        # For some commands (like configure), we might not have a config yet
+        # So we'll defer initialization to individual commands that need it
+        logger.debug(f"Deferred context initialization: {e}")
+        ctx.obj.verbose = verbose
 
 @cli.command()
 def configure():
@@ -183,34 +288,37 @@ def configure():
 
 @cli.command()
 @click.option('--sso-session', default='default', help='SSO session name to use')
-def init(sso_session):
+@click.pass_context
+def init(ctx, sso_session):
     """Initialize SSO and discover AWS accounts"""
     click.echo(f"🚀 Initializing with SSO session: {sso_session}")
     
     try:
-        from config.manager import load_or_create_config
-        from aws.account_manager import AccountManager, AccountManagerError
         from aws.sso_client import is_sso_configured
         
-        # Load configuration to get region and account file settings
-        config_manager = load_or_create_config()
-        region = config_manager.get('general', 'region', 'us-east-1')
-        account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
-        
-        # Check if SSO session is configured
-        if not is_sso_configured(sso_session):
-            click.echo(f"❌ SSO session '{sso_session}' not found in AWS config")
-            click.echo("Please configure SSO in ~/.aws/config first. Example:")
-            click.echo(f"""
+        # If a specific SSO session is provided, we need to reinitialize the account manager
+        if sso_session != 'default' or not ctx.obj.account_manager:
+            config_manager = ctx.obj.config_manager or load_or_create_config()
+            region = config_manager.get('general', 'region', 'us-east-1')
+            account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
+            
+            # Check if SSO session is configured
+            if not is_sso_configured(sso_session):
+                click.echo(f"❌ SSO session '{sso_session}' not found in AWS config")
+                click.echo("Please configure SSO in ~/.aws/config first. Example:")
+                click.echo(f"""
 [sso-session {sso_session}]
 sso_start_url = https://your-sso-portal.awsapps.com/start
 sso_region = us-east-1
 sso_registration_scopes = sso:account:access
 """)
-            return
-        
-        # Initialize account manager
-        account_manager = AccountManager(sso_session, region, account_file)
+                return
+            
+            # Initialize account manager with specific session
+            account_manager = AccountManager(sso_session, region, account_file)
+            ctx.obj.account_manager = account_manager
+        else:
+            account_manager = get_account_manager(ctx)
         
         click.echo("🔐 Authenticating with AWS SSO...")
         if not account_manager.authenticate():
@@ -219,6 +327,26 @@ sso_registration_scopes = sso:account:access
         
         click.echo("🔍 Discovering AWS accounts...")
         collection = account_manager.discover_accounts(force_refresh=True)
+        
+        # Sanitize account names for profile compatibility
+        click.echo("🧹 Sanitizing account names for profile compatibility...")
+        sanitized_count = 0
+        for account in collection.accounts:
+            original_name = account.name
+            sanitized_name = sanitize_profile_name_component(account.name)
+            
+            if original_name != sanitized_name:
+                account.name = sanitized_name
+                click.echo(f"   Sanitized: '{original_name}' -> '{sanitized_name}' (ID: {account.id})")
+                sanitized_count += 1
+        
+        if sanitized_count > 0:
+            # Save the updated account collection with sanitized names
+            try:
+                account_manager.data_manager.save_accounts(collection)
+                click.echo(f"📝 Sanitized {sanitized_count} account name(s)")
+            except Exception as e:
+                click.echo(f"⚠️  Could not save sanitized names: {e}")
         
         active_accounts = collection.get_active_accounts()
         disabled_accounts = collection.get_disabled_accounts()
@@ -236,10 +364,12 @@ sso_registration_scopes = sso:account:access
             for account in disabled_accounts:
                 click.echo(f"  • {account.id} - {account.name}")
         
-        click.echo(f"\n💾 Account data saved to: {account_file}")
+        click.echo(f"\n💾 Account data saved to: {account_manager.data_manager.account_file}")
         click.echo(f"\n🚀 Next steps:")
         click.echo(f"  1. Run 'python main.py roles --accounts <account-ids>' to fetch available roles")
         click.echo(f"  2. Run 'python main.py profiles --accounts <account-ids> --role <role-name>' to generate profiles")
+        if sanitized_count == 0:
+            click.echo(f"  OR run 'python main.py sanitize-names' if you have existing accounts with problematic names")
         
     except AccountManagerError as e:
         click.echo(f"❌ Account discovery error: {e}", err=True)
@@ -249,21 +379,12 @@ sso_registration_scopes = sso:account:access
 
 @cli.command()
 @click.option('--accounts', required=True, help='Comma-separated account IDs or file path')
-def roles(accounts):
+@click.pass_context
+def roles(ctx, accounts):
     """Fetch available roles for specified accounts"""
     click.echo(f"🔍 Fetching roles for accounts: {accounts}")
     
     try:
-        from config.manager import load_or_create_config
-        from aws.account_manager import AccountManager, AccountManagerError
-        from utils.validators import parse_account_list
-        
-        # Load configuration
-        config_manager = load_or_create_config()
-        sso_session = config_manager.get('general', 'sso-session', 'default')
-        region = config_manager.get('general', 'region', 'us-east-1')
-        account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
-        
         # Parse account list
         account_ids = parse_account_list(accounts)
         if not account_ids:
@@ -272,15 +393,9 @@ def roles(accounts):
         
         click.echo(f"📋 Processing {len(account_ids)} account(s)")
         
-        # Initialize account manager
-        account_manager = AccountManager(sso_session, region, account_file)
-        
-        # Check if authenticated
-        if not account_manager.is_authenticated():
-            click.echo("🔐 Authenticating with AWS SSO...")
-            if not account_manager.authenticate():
-                click.echo("❌ SSO authentication failed", err=True)
-                return
+        # Get account manager and ensure authentication
+        account_manager = get_account_manager(ctx)
+        ctx.obj.ensure_authenticated()
         
         # Update roles for accounts
         click.echo("🔍 Fetching roles...")
@@ -314,7 +429,7 @@ def roles(accounts):
             for account_id in failed_accounts:
                 click.echo(f"  • {account_id}")
         
-        click.echo(f"\n💾 Role data saved to: {account_file}")
+        click.echo(f"\n💾 Role data saved to: {account_manager.data_manager.account_file}")
         click.echo(f"\n🚀 Next step:")
         click.echo(f"  Run 'python main.py profiles --accounts <account-ids> --role <role-name>' to generate profiles")
         
@@ -331,22 +446,18 @@ def roles(accounts):
 @click.option('--format', type=click.Choice(['aws-cli', 'env-vars']), default='aws-cli', help='Output format')
 @click.option('--output-file', help='File to write profiles to')
 @click.option('--append-to-config', is_flag=True, help='Append profiles directly to ~/.aws/config')
-def profiles(accounts, role, region, format, output_file, append_to_config):
+@click.pass_context
+def profiles(ctx, accounts, role, region, format, output_file, append_to_config):
     """Generate AWS CLI profiles for specified accounts and role"""
     click.echo(f"� Generating {format} profiles for role '{role}'")
     
     try:
-        from config.manager import load_or_create_config
-        from aws.account_manager import AccountManager, AccountManagerError
-        from utils.validators import parse_account_list
         from datetime import datetime
         import os
         
-        # Load configuration
-        config_manager = load_or_create_config()
-        sso_session = config_manager.get('general', 'sso-session', 'default')
+        # Get configuration values
+        config_manager = ctx.obj.config_manager or load_or_create_config()
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
-        account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
         prefix = config_manager.get('general', 'prefix', 'multi-aws')
         
         # Parse account list
@@ -357,15 +468,9 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
         
         click.echo(f"📋 Processing {len(account_ids)} account(s)")
         
-        # Initialize account manager
-        account_manager = AccountManager(sso_session, config_region, account_file)
-        
-        # Check if authenticated
-        if not account_manager.is_authenticated():
-            click.echo("🔐 Authenticating with AWS SSO...")
-            if not account_manager.authenticate():
-                click.echo("❌ SSO authentication failed", err=True)
-                return
+        # Get account manager and ensure authentication
+        account_manager = get_account_manager(ctx)
+        ctx.obj.ensure_authenticated()
         
         # Validate accounts and role
         profiles_data = []
@@ -393,9 +498,14 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
             
             # Generate profile data
             if format == 'aws-cli':
-                profile_name = f"{prefix}-{account.name}-{role}"
+                # Sanitize account name for profile naming
+                sanitized_account_name = sanitize_profile_name_component(account.name)
+                
+                profile_name = f"{prefix}-{sanitized_account_name}-{role}"
+                click.echo(f"   Creating profile: {profile_name} (from account: {account.name})")
+                
                 profiles_data.append(f"[profile {profile_name}]")
-                profiles_data.append(f"sso_session = {sso_session}")
+                profiles_data.append(f"sso_session = {account_manager.sso_session}")
                 profiles_data.append(f"sso_account_id = {account.id}")
                 profiles_data.append(f"sso_role_name = {role}")
                 profiles_data.append(f"region = {config_region}")
@@ -404,7 +514,10 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
                 # Store the profile name in the account for future reference
                 account.set_profile_name(profile_name)
             else:  # env-vars
-                profile_name = f"{prefix}-{account.name}-{role}"
+                # Sanitize account name for profile naming
+                sanitized_account_name = sanitize_profile_name_component(account.name)
+                
+                profile_name = f"{prefix}-{sanitized_account_name}-{role}"
                 clean_name = account.name.replace('-', '_').replace(' ', '_').upper()
                 profiles_data.append(f"# {account.name} ({account.id})")
                 profiles_data.append(f"export AWS_PROFILE_{clean_name}='{profile_name}'")
@@ -430,7 +543,7 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
         profiles_content = '\n'.join(profiles_data)
         
         if append_to_config and format == 'aws-cli':
-            # Append to AWS config file
+            # Append to AWS config file with duplicate checking
             aws_config_path = os.path.expanduser('~/.aws/config')
             
             # Ensure .aws directory exists
@@ -442,15 +555,111 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
                 with open(aws_config_path, 'w') as f:
                     f.write("# AWS Config File\n\n")
             
-            # Append profiles to config file
-            with open(aws_config_path, 'a') as f:
-                f.write(f"\n# Generated by MultiAWSTool - {role} profiles\n")
-                f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(profiles_content)
-                f.write("\n")
+            # Read existing config to check for duplicates
+            existing_profiles = set()
+            updated_profiles = []
+            new_profiles = []
             
-            click.echo(f"✅ Generated {len(valid_accounts)} profile(s) for role '{role}'")
-            click.echo(f"📝 Profiles appended to: {aws_config_path}")
+            try:
+                with open(aws_config_path, 'r') as f:
+                    existing_content = f.read()
+                    
+                # Parse existing profiles
+                for line in existing_content.split('\n'):
+                    if line.strip().startswith('[profile '):
+                        profile_name = line.strip()[9:-1]  # Remove '[profile ' and ']'
+                        existing_profiles.add(profile_name)
+                
+                # Separate new and existing profiles
+                current_profiles = []
+                for line in profiles_data:
+                    if line.startswith('[profile '):
+                        profile_name = line[9:-1]  # Remove '[profile ' and ']'
+                        current_profiles.append(profile_name)
+                        if profile_name in existing_profiles:
+                            updated_profiles.append(profile_name)
+                        else:
+                            new_profiles.append(profile_name)
+                
+                if updated_profiles:
+                    click.echo(f"🔄 Updating {len(updated_profiles)} existing profile(s):")
+                    for profile in updated_profiles:
+                        click.echo(f"   • {profile}")
+                    
+                    # Remove existing profiles from config content
+                    lines = existing_content.split('\n')
+                    new_lines = []
+                    skip_section = False
+                    current_section = None
+                    
+                    for line in lines:
+                        line_stripped = line.strip()
+                        
+                        # Check for profile section
+                        if line_stripped.startswith('[profile ') and line_stripped.endswith(']'):
+                            current_section = line_stripped[9:-1]  # Remove '[profile ' and ']'
+                            skip_section = current_section in updated_profiles
+                            
+                        # Add line if we're not skipping this section
+                        if not skip_section:
+                            new_lines.append(line)
+                        
+                        # Reset skip flag if we hit an empty line (end of section)
+                        if not line_stripped:
+                            skip_section = False
+                    
+                    existing_content = '\n'.join(new_lines)
+                
+                if new_profiles:
+                    click.echo(f"➕ Creating {len(new_profiles)} new profile(s):")
+                    for profile in new_profiles:
+                        click.echo(f"   • {profile}")
+                
+            except Exception as e:
+                click.echo(f"⚠️  Could not parse existing config: {e}")
+                existing_content = ""
+            
+            # Write updated config file
+            try:
+                with open(aws_config_path, 'w') as f:
+                    if existing_content.strip():
+                        f.write(existing_content.rstrip() + '\n\n')
+                    
+                    f.write(f"# Generated by MultiAWSTool - {role} profiles\n")
+                    f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(profiles_content)
+                    f.write("\n")
+                
+                click.echo(f"✅ Generated {len(valid_accounts)} profile(s) for role '{role}'")
+                click.echo(f"📝 Profiles written to: {aws_config_path}")
+                
+                # Validate that all profiles can be found
+                click.echo("\n🔍 Validating created profiles...")
+                validation_errors = []
+                
+                try:
+                    with open(aws_config_path, 'r') as f:
+                        final_content = f.read()
+                    
+                    for account in valid_accounts:
+                        profile_name = f"{prefix}-{sanitize_profile_name_component(account.name)}-{role}"
+                        if f"[profile {profile_name}]" not in final_content:
+                            validation_errors.append(profile_name)
+                    
+                    if validation_errors:
+                        click.echo(f"❌ Failed to validate {len(validation_errors)} profile(s):")
+                        for profile in validation_errors:
+                            click.echo(f"   • {profile}")
+                        click.echo("   These profiles may not have been created correctly.")
+                    else:
+                        click.echo(f"✅ All {len(valid_accounts)} profile(s) validated successfully")
+                        
+                except Exception as e:
+                    click.echo(f"⚠️  Could not validate profiles: {e}")
+                
+            except Exception as e:
+                click.echo(f"❌ Failed to write config file: {e}", err=True)
+                return
             
         elif output_file:
             output_path = os.path.expanduser(output_file)
@@ -496,22 +705,18 @@ def profiles(accounts, role, region, format, output_file, append_to_config):
 
 @cli.command()
 @click.option('--dry-run', is_flag=True, help='Show what would be synced without making changes')
-def sync(dry_run):
+@click.pass_context
+def sync(ctx, dry_run):
     """Sync profile names from ~/.aws/config to account data"""
     click.echo("🔄 Syncing profiles from AWS config to account data")
     
     try:
-        from config.manager import load_or_create_config
-        from aws.account_manager import AccountManager, AccountManagerError
         import configparser
         import os
         
-        # Load configuration
-        config_manager = load_or_create_config()
+        # Get configuration values
+        config_manager = ctx.obj.config_manager or load_or_create_config()
         prefix = config_manager.get('general', 'prefix', 'multi-aws')
-        sso_session = config_manager.get('general', 'sso-session', 'default')
-        region = config_manager.get('general', 'region', 'us-east-1')
-        account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
         
         click.echo(f"📋 Looking for profiles with prefix: {prefix}")
         
@@ -529,8 +734,8 @@ def sync(dry_run):
             click.echo(f"❌ Failed to parse AWS config file: {e}", err=True)
             return
         
-        # Initialize account manager
-        account_manager = AccountManager(sso_session, region, account_file)
+        # Get account manager
+        account_manager = get_account_manager(ctx)
         
         # Find profiles with our prefix
         found_profiles = {}
@@ -589,7 +794,7 @@ def sync(dry_run):
                 try:
                     account_manager.data_manager.save_accounts(account_collection)
                     click.echo(f"\n✅ Successfully updated {updates_made} account(s)")
-                    click.echo(f"💾 Account data saved to: {account_file}")
+                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.account_file}")
                 except Exception as e:
                     click.echo(f"❌ Failed to save account data: {e}", err=True)
                     return
@@ -612,22 +817,292 @@ def sync(dry_run):
         logger.exception("Unexpected error during profile sync")
 
 @cli.command()
+@click.option('--dry-run', is_flag=True, help='Show what would be sanitized without making changes')
+@click.pass_context
+def sanitize_names(ctx, dry_run):
+    """Sanitize account names in stored account data for profile compatibility"""
+    click.echo("🧹 Sanitizing account names for profile compatibility")
+    
+    try:
+        # Get account manager
+        account_manager = get_account_manager(ctx)
+        
+        # Load current account data
+        try:
+            account_collection = account_manager.data_manager.load_accounts()
+        except Exception as e:
+            click.echo(f"❌ Failed to load account data: {e}", err=True)
+            return
+        
+        if not account_collection.accounts:
+            click.echo("ℹ️  No accounts found in account data")
+            return
+        
+        # Check each account for sanitization needs
+        updates_made = 0
+        for account in account_collection.accounts:
+            original_name = account.name
+            sanitized_name = sanitize_profile_name_component(account.name)
+            
+            if original_name != sanitized_name:
+                if dry_run:
+                    click.echo(f"🔄 Would sanitize: '{original_name}' -> '{sanitized_name}' (ID: {account.id})")
+                else:
+                    account.name = sanitized_name
+                    click.echo(f"✅ Sanitized: '{original_name}' -> '{sanitized_name}' (ID: {account.id})")
+                updates_made += 1
+            else:
+                click.echo(f"✓ {account.name} (ID: {account.id}): already sanitized")
+        
+        if updates_made > 0:
+            if dry_run:
+                click.echo(f"\n📝 Dry run: {updates_made} account name(s) would be sanitized")
+                click.echo("   Run without --dry-run to apply changes")
+            else:
+                # Save the updated account collection
+                try:
+                    account_manager.data_manager.save_accounts(account_collection)
+                    click.echo(f"\n✅ Successfully sanitized {updates_made} account name(s)")
+                    click.echo(f"💾 Account data saved to: {account_manager.data_manager.account_file}")
+                except Exception as e:
+                    click.echo(f"❌ Failed to save account data: {e}", err=True)
+                    return
+        else:
+            click.echo("\n✅ All account names are already sanitized")
+        
+        # Show summary
+        click.echo(f"\n📋 Sanitization Summary:")
+        click.echo(f"  📊 Accounts checked: {len(account_collection.accounts)}")
+        click.echo(f"  ✅ Names sanitized: {updates_made}")
+        
+        if not dry_run and updates_made > 0:
+            click.echo(f"\n🚀 Next steps:")
+            click.echo(f"  1. Run 'python main.py profiles --accounts <account-ids> --role <role-name>' to regenerate profiles")
+            click.echo(f"  2. Run 'python main.py sync' if you have existing profiles to update")
+        
+    except AccountManagerError as e:
+        click.echo(f"❌ Sanitization error: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during name sanitization")
+
+@cli.command()
+@click.option('--dry-run', is_flag=True, help='Show what would be cleaned without making changes')
+@click.option('--prefix-only', is_flag=True, help='Only check profiles with the configured prefix')
+def clean_duplicates(dry_run, prefix_only):
+    """Check for and clean up duplicate profiles in ~/.aws/config"""
+    click.echo("🔍 Checking for duplicate profiles in AWS config")
+    
+    try:
+        from config.manager import load_or_create_config
+        import configparser
+        import os
+        import shutil
+        from collections import defaultdict
+        
+        # Load configuration
+        config_manager = load_or_create_config()
+        prefix = config_manager.get('general', 'prefix', 'multi-aws')
+        
+        if prefix_only:
+            click.echo(f"📋 Checking only profiles with prefix: {prefix}")
+        else:
+            click.echo("📋 Checking all profiles")
+        
+        # Check if AWS config exists
+        aws_config_path = os.path.expanduser('~/.aws/config')
+        if not os.path.exists(aws_config_path):
+            click.echo("❌ AWS config file not found at ~/.aws/config", err=True)
+            return
+        
+        # Read the config file content
+        try:
+            with open(aws_config_path, 'r') as f:
+                config_content = f.read()
+        except Exception as e:
+            click.echo(f"❌ Failed to read AWS config file: {e}", err=True)
+            return
+        
+        # Parse AWS config file manually to handle duplicates
+        profiles_data = []
+        current_section = None
+        current_profile = {}
+        
+        for line_num, line in enumerate(config_content.split('\n'), 1):
+            line = line.strip()
+            
+            # Check for profile section
+            if line.startswith('[profile ') and line.endswith(']'):
+                # Save previous profile if exists
+                if current_section and current_profile:
+                    profiles_data.append({
+                        'name': current_section,
+                        'line_num': current_profile.get('start_line', line_num),
+                        'config': current_profile.copy()
+                    })
+                
+                # Start new profile
+                current_section = line[9:-1]  # Remove '[profile ' and ']'
+                current_profile = {'start_line': line_num}
+                
+            elif current_section and '=' in line:
+                # Parse config line
+                key, value = line.split('=', 1)
+                current_profile[key.strip()] = value.strip()
+        
+        # Handle last profile
+        if current_section and current_profile:
+            profiles_data.append({
+                'name': current_section,
+                'line_num': current_profile.get('start_line', len(config_content.split('\n'))),
+                'config': current_profile.copy()
+            })
+        
+        # Group profiles by their key attributes to find duplicates
+        profile_groups = defaultdict(list)
+        total_profiles = len(profiles_data)
+        
+        for profile_data in profiles_data:
+            profile_name = profile_data['name']
+            profile_config = profile_data['config']
+            
+            # Skip if prefix_only is set and profile doesn't match prefix
+            if prefix_only and not profile_name.startswith(prefix + '-'):
+                continue
+            
+            # Create a key based on account ID and role for grouping
+            account_id = profile_config.get('sso_account_id', '')
+            role_name = profile_config.get('sso_role_name', '')
+            sso_session = profile_config.get('sso_session', '')
+            
+            if account_id and role_name:
+                # Group by account_id + role_name + sso_session
+                group_key = f"{account_id}-{role_name}-{sso_session}"
+                profile_groups[group_key].append({
+                    'name': profile_name,
+                    'line_num': profile_data['line_num'],
+                    'account_id': account_id,
+                    'role_name': role_name,
+                    'sso_session': sso_session,
+                    'config': profile_config
+                })
+        
+        click.echo(f"📊 Found {total_profiles} total profiles in AWS config")
+        
+        # Find duplicates
+        duplicates_found = 0
+        profiles_to_remove = []
+        
+        for group_key, profiles in profile_groups.items():
+            if len(profiles) > 1:
+                duplicates_found += len(profiles) - 1
+                
+                # Sort profiles to keep the most recent or appropriately named one
+                # Keep the first one that matches our prefix pattern, or the first one alphabetically
+                profiles.sort(key=lambda x: (
+                    not x['name'].startswith(prefix + '-'),  # Prefer our prefix
+                    x['name']  # Then alphabetical
+                ))
+                
+                keeper = profiles[0]
+                duplicates = profiles[1:]
+                
+                click.echo(f"\n🔍 Found duplicates for {keeper['account_id']} + {keeper['role_name']}:")
+                click.echo(f"   ✅ Keeping: {keeper['name']}")
+                
+                for duplicate in duplicates:
+                    click.echo(f"   ❌ Duplicate: {duplicate['name']}")
+                    profiles_to_remove.append(duplicate['name'])  # Store profile name instead of section
+        
+        if duplicates_found == 0:
+            if prefix_only:
+                click.echo(f"✅ No duplicate profiles found with prefix '{prefix}'")
+            else:
+                click.echo("✅ No duplicate profiles found")
+            return
+        
+        click.echo(f"\n📋 Summary:")
+        click.echo(f"  🔍 Duplicate profiles found: {duplicates_found}")
+        click.echo(f"  🗑️  Profiles to remove: {len(profiles_to_remove)}")
+        
+        if dry_run:
+            click.echo("\n📝 Dry run: No changes made")
+            click.echo("   Run without --dry-run to remove duplicates")
+            return
+        
+        # Confirm removal
+        if not click.confirm(f"\nAre you sure you want to remove {len(profiles_to_remove)} duplicate profile(s)?"):
+            click.echo("Operation cancelled")
+            return
+        
+        # Create backup
+        backup_path = f"{aws_config_path}.backup.{int(__import__('time').time())}"
+        try:
+            shutil.copy2(aws_config_path, backup_path)
+            click.echo(f"📋 Created backup: {backup_path}")
+        except Exception as e:
+            click.echo(f"⚠️  Could not create backup: {e}")
+            if not click.confirm("Continue without backup?"):
+                return
+        
+        # Remove duplicate sections from config by rebuilding the file
+        lines = config_content.split('\n')
+        new_lines = []
+        skip_section = False
+        current_section = None
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # Check for profile section
+            if line_stripped.startswith('[profile ') and line_stripped.endswith(']'):
+                current_section = line_stripped[9:-1]  # Remove '[profile ' and ']'
+                skip_section = current_section in profiles_to_remove
+                
+            # Add line if we're not skipping this section
+            if not skip_section:
+                new_lines.append(line)
+            
+            # Reset skip flag if we hit an empty line (end of section)
+            if not line_stripped:
+                skip_section = False
+        
+        # Write updated config back to file
+        try:
+            with open(aws_config_path, 'w') as f:
+                f.write('\n'.join(new_lines))
+            
+            click.echo(f"\n✅ Successfully removed {len(profiles_to_remove)} duplicate profile(s)")
+            click.echo(f"💾 Updated AWS config saved to: {aws_config_path}")
+            
+        except Exception as e:
+            click.echo(f"❌ Failed to write updated config: {e}", err=True)
+            if os.path.exists(backup_path):
+                click.echo(f"   Backup available at: {backup_path}")
+            return
+        
+        click.echo(f"\n🚀 Next steps:")
+        click.echo(f"  Run 'python main.py sync' to update account data with current profiles")
+        
+    except Exception as e:
+        click.echo(f"❌ Duplicate cleanup error: {e}", err=True)
+        logger.exception("Unexpected error during duplicate cleanup")
+
+@cli.command()
 @click.argument('command')
 @click.option('--accounts', required=True, help='Comma-separated account IDs or file path')
 @click.option('--output-dir', help='Directory to save output files')
 @click.option('--region', help='AWS region override')
 @click.option('--parallel', is_flag=True, help='Execute commands in parallel')
 @click.option('--timeout', type=int, default=300, help='Command timeout in seconds')
-def run(command, accounts, output_dir, region, parallel, timeout):
+@click.pass_context
+def run(ctx, command, accounts, output_dir, region, parallel, timeout):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
     click.echo("Using each account's configured profile")
     
     try:
-        from config.manager import load_or_create_config
-        from aws.account_manager import AccountManager, AccountManagerError
-        from utils.validators import parse_account_list
         from models.result import CommandResult, ResultStatus
         import subprocess
         import os
@@ -635,12 +1110,11 @@ def run(command, accounts, output_dir, region, parallel, timeout):
         from datetime import datetime
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        # Load configuration
-        config_manager = load_or_create_config()
-        sso_session = config_manager.get('general', 'sso-session', 'default')
+        # Get configuration values
+        config_manager = ctx.obj.config_manager or load_or_create_config()
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
-        account_file = config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
         output_format = config_manager.get('output', 'format', 'json')
+        output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
         
         # Parse account list
         account_ids = parse_account_list(accounts)
@@ -650,15 +1124,9 @@ def run(command, accounts, output_dir, region, parallel, timeout):
         
         click.echo(f"📋 Processing {len(account_ids)} account(s)")
         
-        # Initialize account manager
-        account_manager = AccountManager(sso_session, config_region, account_file)
-        
-        # Check if authenticated
-        if not account_manager.is_authenticated():
-            click.echo("🔐 Authenticating with AWS SSO...")
-            if not account_manager.authenticate():
-                click.echo("❌ SSO authentication failed", err=True)
-                return
+        # Get account manager and ensure authentication
+        account_manager = get_account_manager(ctx)
+        ctx.obj.ensure_authenticated()
         
         # Validate accounts and check they have profiles configured
         valid_accounts = []
@@ -740,10 +1208,26 @@ def run(command, accounts, output_dir, region, parallel, timeout):
                 # Save output to file if specified
                 if output_dir:
                     timestamp_str = start_time.strftime('%Y%m%d_%H%M%S')
+                    date_str = start_time.strftime('%Y%m%d')
+                    time_str = start_time.strftime('%H%M%S')
+                    
                     # Extract role from profile name for filename (profile format: prefix-account-role)
                     profile_parts = profile_name.split('-')
                     role_name = profile_parts[-1] if len(profile_parts) > 2 else 'unknown'
-                    filename = f"{account.name}_{role_name}_{timestamp_str}.{output_format}"
+                    
+                    # Generate filename using configurable pattern
+                    # Pattern placeholders: !a=account_id, !A=account_name, !c=command, !d=date, !t=time, !s=timestamp, !r=role
+                    # Default pattern: '!A-!c-!d' (account_name-command-date)
+                    filename_base = output_pattern
+                    filename_base = filename_base.replace('!a', account.id)
+                    filename_base = filename_base.replace('!A', account.name.replace(' ', '_').replace('/', '_'))
+                    filename_base = filename_base.replace('!c', command.replace(' ', '_').replace('/', '_'))
+                    filename_base = filename_base.replace('!d', date_str)
+                    filename_base = filename_base.replace('!t', time_str)
+                    filename_base = filename_base.replace('!s', timestamp_str)
+                    filename_base = filename_base.replace('!r', role_name)
+                    
+                    filename = f"{filename_base}.{output_format}"
                     file_path = os.path.join(output_path, filename)
                     
                     with open(file_path, 'w') as f:
@@ -844,6 +1328,92 @@ def run(command, accounts, output_dir, region, parallel, timeout):
     except Exception as e:
         click.echo(f"❌ Unexpected error: {e}", err=True)
         logger.exception("Unexpected error during command execution")
+
+@cli.command('parse-iam-reports')
+@click.option('--summary-file', '-s', type=click.Path(exists=True), 
+              help='Path to execution summary JSON file containing IAM credential report commands')
+@click.option('--inactive-days', '-d', type=int, default=90, 
+              help='Number of days to consider credentials inactive (default: 90)')
+@click.option('--output', '-o', type=click.Path(), 
+              help='Output file path for parsed report (optional)')
+@click.option('--format', 'output_format', type=click.Choice(['json', 'yaml', 'table']), 
+              default='table', help='Output format (default: table)')
+@click.pass_context
+def parse_iam_reports(ctx, summary_file, inactive_days, output, output_format):
+    """Parse IAM credential reports from execution summary files"""
+    
+    try:
+        import json
+        from datetime import datetime
+        from utils.report_parser import (
+            parse_iam_report, 
+            extract_user_credentials, 
+            summarize_inactive_credentials,
+            generate_credential_report_summary,
+            process_multi,
+            load_from_summary
+        )
+        from models.result import ExecutionSummary, CommandResult
+        
+        # Auto-detect latest summary file if not provided
+        if not summary_file:
+            outputs_dir = Path("outputs")
+            if outputs_dir.exists():
+                summary_files = list(outputs_dir.glob("execution_summary_*.json"))
+                if summary_files:
+                    # Get the most recent summary file
+                    summary_file = max(summary_files, key=lambda f: f.stat().st_mtime)
+                    click.echo(f"📄 Using latest summary file: {summary_file}")
+                else:
+                    click.echo("❌ No execution summary files found in outputs/ directory", err=True)
+                    return
+            else:
+                click.echo("❌ outputs/ directory not found", err=True)
+                return
+        
+        # Load execution summary
+        res = load_from_summary(summary_file)
+        reports = []
+        for ac in res:
+            print(ac["account_id"])
+            print(len(ac["report"]["Users"]))
+            creds = extract_user_credentials(ac["report"])
+            print(creds)
+            inactive_summary = summarize_inactive_credentials(creds, inactive_days)
+            print(inactive_summary)
+            report_summary = generate_credential_report_summary(
+                creds,
+                account_id=ac["account_id"],
+                account_name = get_account_name(ctx, ac["account_id"]),
+                inactive_summary=inactive_summary,
+                inactive_days=inactive_days
+            )
+            reports.append(report_summary)
+
+        # Output results
+        if output:
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w') as f:
+                if output_format == 'json':
+                    json.dump([r.to_dict() for r in reports], f, indent=2)
+                elif output_format == 'yaml':
+                    import yaml
+                    yaml.dump([r.to_dict() for r in reports], f)
+                else:
+                    f.write('\n\n'.join(r.to_table() for r in reports))
+            click.echo(f"💾 Parsed report saved to: {output_path}")
+        else: #pretty print
+            for report in reports:
+                print("Account:", report.account_name, "(", report.account_id, ")")
+                print("Inactive Credentials (> {} days):".format(inactive_days))
+
+
+    except Exception as e:
+        click.echo(f"❌ Error loading summary file: {e}", err=True)
+        print(e)
+        return
+
 
 @cli.command()
 @click.option('--profiles', is_flag=True, help='Clean up generated profiles')
@@ -964,6 +1534,10 @@ def cleanup(profiles, tokens, accounts, all, confirm):
                     click.echo(f"⚠️  Could not remove tool directory: {e}")
         
         click.echo("\n🎉 Cleanup completed!")
+        
+        if all or profiles:
+            click.echo("\n💡 Tip:")
+            click.echo("  Run 'python main.py clean-duplicates' to check for and remove duplicate profiles")
         
         if all or tokens:
             click.echo("\n📖 Next steps:")
