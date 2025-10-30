@@ -1089,14 +1089,15 @@ def clean_duplicates(dry_run, prefix_only):
         logger.exception("Unexpected error during duplicate cleanup")
 
 @cli.command()
-@click.argument('command')
 @click.option('--accounts', required=True, help='Comma-separated account IDs or file path')
 @click.option('--output-dir', help='Directory to save output files')
 @click.option('--region', help='AWS region override')
 @click.option('--parallel', is_flag=True, help='Execute commands in parallel')
 @click.option('--timeout', type=int, default=300, help='Command timeout in seconds')
+@click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
+@click.option('--command', required=True, help='AWS CLI command to execute (enclose in quotes)', prompt=True)
 @click.pass_context
-def run(ctx, command, accounts, output_dir, region, parallel, timeout):
+def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
@@ -1115,6 +1116,10 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout):
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
         output_format = config_manager.get('output', 'format', 'json')
         output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
+
+        # Check dry-run option
+        print(command)
+
         
         # Parse account list
         account_ids = parse_account_list(accounts)
@@ -1172,16 +1177,28 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout):
                 )
             
             # Build AWS CLI command
+            print(command)
             aws_command = [
                 'aws', '--profile', profile_name,
                 '--region', config_region,
-                '--output', output_format
-            ] + command.split()
+                '--output', output_format,
+            ] + command.split(' ')
             
             start_time = datetime.now()
             
             try:
                 click.echo(f"🔄 Executing on {account.name} ({account.id})...")
+                if dry_run:
+                    click.echo(f"   Dry run: {' '.join(aws_command)}")
+                    return CommandResult(
+                        account_id=account.id,
+                        command=command,
+                        status=ResultStatus.SUCCESS,
+                        output="",
+                        error="Dry run - command not executed",
+                        timestamp=start_time,
+                        execution_time=0
+                    )
                 
                 # Execute command
                 result = subprocess.run(
@@ -1190,6 +1207,7 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout):
                     text=True,
                     timeout=timeout
                 )
+                print(result.args)
                 
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
@@ -1215,13 +1233,42 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout):
                     profile_parts = profile_name.split('-')
                     role_name = profile_parts[-1] if len(profile_parts) > 2 else 'unknown'
                     
+                    # Extract only the command name (first part) without parameters
+                    command_parts = command.strip().split()
+                    # Skip AWS CLI global options and get the service and operation
+                    command_name_parts = []
+                    skip_next = False
+                    
+                    for part in command_parts:
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        
+                        # Skip AWS CLI global options
+                        if part.startswith('--'):
+                            # Some options have values, so we need to skip the next part too
+                            if part in ['--profile', '--region', '--output', '--endpoint-url']:
+                                skip_next = True
+                            continue
+                        
+                        # This should be service and operation (e.g., 'securityhub', 'get-findings')
+                        command_name_parts.append(part)
+                        
+                        # Stop after getting service and operation (first two non-option parts)
+                        if len(command_name_parts) >= 2:
+                            break
+                    
+                    # Create clean command name for filename
+                    command_name = '-'.join(command_name_parts) if command_name_parts else 'unknown-command'
+                    command_name = command_name.replace('/', '_')  # Replace any slashes
+                    
                     # Generate filename using configurable pattern
                     # Pattern placeholders: !a=account_id, !A=account_name, !c=command, !d=date, !t=time, !s=timestamp, !r=role
                     # Default pattern: '!A-!c-!d' (account_name-command-date)
                     filename_base = output_pattern
                     filename_base = filename_base.replace('!a', account.id)
                     filename_base = filename_base.replace('!A', account.name.replace(' ', '_').replace('/', '_'))
-                    filename_base = filename_base.replace('!c', command.replace(' ', '_').replace('/', '_'))
+                    filename_base = filename_base.replace('!c', command_name)
                     filename_base = filename_base.replace('!d', date_str)
                     filename_base = filename_base.replace('!t', time_str)
                     filename_base = filename_base.replace('!s', timestamp_str)
