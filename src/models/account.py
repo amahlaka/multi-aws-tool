@@ -47,6 +47,8 @@ class Account:
     roles: List[Role] = field(default_factory=list)
     profile_name: Optional[str] = None
     last_updated: datetime = field(default_factory=datetime.now)
+    product_team: Optional[str] = None
+    tags: Dict[str, str] = field(default_factory=dict)
     
     def __post_init__(self):
         """Post-initialization validation and conversion"""
@@ -65,6 +67,11 @@ class Account:
                 self.last_updated = datetime.fromisoformat(self.last_updated)
             except ValueError:
                 self.last_updated = datetime.now()
+    
+    def set_team(self, team_name: str) -> None:
+        """Set the product team for this account"""
+        self.product_team = team_name
+        self.last_updated = datetime.now()
     
     def add_role(self, role: Role) -> None:
         """Add a role to this account"""
@@ -116,7 +123,8 @@ class Account:
             'status': self.status.value,
             'roles': [role.to_dict() for role in self.roles],
             'profile_name': self.profile_name,
-            'last_updated': self.last_updated.isoformat()
+            'last_updated': self.last_updated.isoformat(),
+            'product_team': self.product_team
         }
     
     @classmethod
@@ -128,7 +136,8 @@ class Account:
             status=data.get('status', 'active'),
             roles=[Role.from_dict(role_data) for role_data in data.get('roles', [])],
             profile_name=data.get('profile_name'),
-            last_updated=data.get('last_updated', datetime.now().isoformat())
+            last_updated=data.get('last_updated', datetime.now().isoformat()),
+            product_team=data.get('product_team')
         )
     
     def __str__(self) -> str:
@@ -137,10 +146,19 @@ class Account:
     
     def __repr__(self) -> str:
         """Detailed representation of the account"""
-        return (f"Account(id='{self.id}', name='{self.name}', "
-                f"status={self.status}, roles={len(self.roles)}, "
-                f"profile_name='{self.profile_name}', "
-                f"last_updated='{self.last_updated.isoformat()}')")
+        parts = [f"Account(id='{self.id}', name='{self.name}'"]
+        
+        if self.product_team:
+            parts.append(f"product_team='{self.product_team}'")
+        
+        parts.extend([
+            f"status={self.status}",
+            f"roles={len(self.roles)}",
+            f"profile_name='{self.profile_name}'",
+            f"last_updated='{self.last_updated.isoformat()}'"
+        ])
+        
+        return ", ".join(parts) + ")"
 
 @dataclass
 class AccountCollection:
@@ -180,6 +198,14 @@ class AccountCollection:
     def get_accounts_by_status(self, status: AccountStatus) -> List[Account]:
         """Get all accounts with a specific status"""
         return [account for account in self.accounts if account.status == status]
+    
+    def get_accounts_by_product_team(self, product_team: str) -> List[Account]:
+        """Get all accounts belonging to a specific product team"""
+        return [account for account in self.accounts if account.product_team == product_team]
+    
+    def get_accounts_by_name(self, name: str) -> List[Account]:
+        """Get all accounts with a specific name"""
+        return [account for account in self.accounts if account.name == name]
     
     def get_active_accounts(self) -> List[Account]:
         """Get all active accounts"""

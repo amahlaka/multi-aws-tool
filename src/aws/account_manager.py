@@ -275,6 +275,19 @@ class AccountManager:
         """Get a specific account by ID"""
         return self.data_manager.get_account(account_id)
     
+    def get_accounts_by_team(self, product_team: str) -> List[Account]:
+        """
+        Get accounts belonging to a specific product team
+        
+        Args:
+            product_team: Name of the product team
+            
+        Returns:
+            List of accounts in the specified team
+        """
+        collection = self.data_manager.load_accounts()
+        return collection.get_accounts_by_product_team(product_team)
+    
     def get_accounts_with_role(self, role_name: str) -> List[Account]:
         """
         Get accounts that have a specific role

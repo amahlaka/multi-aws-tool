@@ -1089,18 +1089,22 @@ def clean_duplicates(dry_run, prefix_only):
         logger.exception("Unexpected error during duplicate cleanup")
 
 @cli.command()
-@click.option('--accounts', required=True, help='Comma-separated account IDs or file path')
+@click.option('--accounts', help='Comma-separated account IDs or file path')
+@click.option('--team', help='Team name(s) to select accounts from')
 @click.option('--output-dir', help='Directory to save output files')
+@click.option('--verbose', is_flag=True, help='Enable verbose output')
+@click.option('--save' , is_flag=True, help='Save command outputs to files')
 @click.option('--region', help='AWS region override')
 @click.option('--parallel', is_flag=True, help='Execute commands in parallel')
 @click.option('--timeout', type=int, default=300, help='Command timeout in seconds')
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
-@click.option('--command', required=True, help='AWS CLI command to execute (enclose in quotes)', prompt=True)
+@click.argument('command', nargs=-1, help="AWS CLI command to execute, put -- before the command ")
 @click.pass_context
-def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
+def run(ctx, command: tuple, accounts, team, output_dir, region, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
+    click.echo(f"Selected team: {team}")
     click.echo("Using each account's configured profile")
     
     try:
@@ -1110,19 +1114,29 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
         import json
         from datetime import datetime
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+        if not accounts and not team:
+            click.echo("❌ You must specify either --accounts or --team to select accounts", err=True)
+            return
         # Get configuration values
         config_manager = ctx.obj.config_manager or load_or_create_config()
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
         output_format = config_manager.get('output', 'format', 'json')
         output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
-
-        # Check dry-run option
-        print(command)
-
         
         # Parse account list
-        account_ids = parse_account_list(accounts)
+        account_manager = get_account_manager(ctx)
+        if team:
+            account_ids = []
+            team_list = [t.strip() for t in team.split(',')]
+            for t in team_list:
+                click.echo(f"📂 Including accounts from team: {t}")
+                team_accounts = account_manager.get_accounts_by_team(t)
+                for acc in team_accounts:
+                    if acc.id not in account_ids:
+                        account_ids.append(acc.id)
+        else:
+            account_ids = parse_account_list(accounts)
+                
         if not account_ids:
             click.echo("❌ No valid account IDs found", err=True)
             return
@@ -1130,7 +1144,6 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
         click.echo(f"📋 Processing {len(account_ids)} account(s)")
         
         # Get account manager and ensure authentication
-        account_manager = get_account_manager(ctx)
         ctx.obj.ensure_authenticated()
         
         # Validate accounts and check they have profiles configured
@@ -1159,7 +1172,14 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
             output_path = os.path.expanduser(output_dir)
             os.makedirs(output_path, exist_ok=True)
             click.echo(f"💾 Output will be saved to: {output_path}")
+        elif save: # use the default save location from the configfile
+            output_path = os.path.expanduser(config_manager.get('output', 'path'))
+            os.makedirs(output_path, exist_ok=True)
+            click.echo(f"💾 Output will be saved to: {output_path}")
+
         
+        command_list = list(command)
+
         def execute_command_for_account(account):
             """Execute command for a single account using its configured profile"""
             profile_name = account.profile_name
@@ -1175,15 +1195,16 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                     timestamp=datetime.now(),
                     execution_time=0
                 )
-            
-            # Build AWS CLI command
-            print(command)
             aws_command = [
                 'aws', '--profile', profile_name,
                 '--region', config_region,
                 '--output', output_format,
-            ] + command.split(' ')
-            
+            ]
+            for cmd_part in command_list:
+                if ' ' in cmd_part:
+                    cmd_part = f'"{cmd_part}"'
+                aws_command.append(cmd_part)
+
             start_time = datetime.now()
             
             try:
@@ -1224,7 +1245,7 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                 )
                 
                 # Save output to file if specified
-                if output_dir:
+                if output_dir or save:
                     timestamp_str = start_time.strftime('%Y%m%d_%H%M%S')
                     date_str = start_time.strftime('%Y%m%d')
                     time_str = start_time.strftime('%H%M%S')
@@ -1234,7 +1255,7 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                     role_name = profile_parts[-1] if len(profile_parts) > 2 else 'unknown'
                     
                     # Extract only the command name (first part) without parameters
-                    command_parts = command.strip().split()
+                    command_parts = command_list
                     # Skip AWS CLI global options and get the service and operation
                     command_name_parts = []
                     skip_next = False
@@ -1273,8 +1294,35 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                     filename_base = filename_base.replace('!t', time_str)
                     filename_base = filename_base.replace('!s', timestamp_str)
                     filename_base = filename_base.replace('!r', role_name)
-                    
+                    filename_base = filename_base.replace('!S', command_name_parts[0] if command_name_parts else 'unknown-service')
+                    filename_base = filename_base.replace('!C', command_name_parts[1] if len(command_name_parts) > 1 else 'unknown-operation')
+                    filename_base = filename_base.replace('!p', account.product_team.replace(' ', '_').replace('/', '_') if account.product_team else 'unknown-team')
                     filename = f"{filename_base}.{output_format}"
+                    
+                    #If format is set, validate that the data is in that format
+                    if output_format == 'json':
+                        try:
+                            json.loads(result.stdout)
+                        except json.JSONDecodeError as e:
+                            click.echo(f"⚠️  Warning: Output is not valid JSON for account {account.name}: {e}")
+                            # Add "-corrupted" suffix to filename
+                            filename = f"{filename_base}-corrupted.{output_format}"
+                    elif output_format == 'yaml' or output_format == 'yml':
+                        try:
+                            import yaml
+                            yaml.safe_load(result.stdout)
+                        except Exception as e:
+                            click.echo(f"⚠️  Warning: Output is not valid YAML for account {account.name}: {e}")
+                            # Add "-corrupted" suffix to filename
+                            filename = f"{filename_base}-corrupted.{output_format}"
+                    
+
+
+                    # Filename base might contain also slashes, this is to allow subdirectories, check and create them
+                    if '/' in filename:
+                        subdir = os.path.dirname(filename)
+                        full_subdir_path = os.path.join(output_path, subdir)
+                        os.makedirs(full_subdir_path, exist_ok=True)
                     file_path = os.path.join(output_path, filename)
                     
                     with open(file_path, 'w') as f:
@@ -1285,7 +1333,7 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                 
                 if result.returncode == 0:
                     click.echo(f"✅ {account.name}: Command completed successfully")
-                    if not output_dir and result.stdout.strip():
+                    if verbose and result.stdout.strip():
                         click.echo(f"📄 Output:\n{result.stdout[:500]}{'...' if len(result.stdout) > 500 else ''}")
                 else:
                     click.echo(f"❌ {account.name}: Command failed")
@@ -1314,6 +1362,8 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
                 duration = (end_time - start_time).total_seconds()
                 
                 click.echo(f"💥 {account.name}: Execution error: {e}")
+                #also print the stack trace to the log
+                logger.exception(f"Execution error for account {account.name} ({account.id})")
                 
                 return CommandResult(
                     account_id=account.id,
@@ -1358,11 +1408,11 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
         click.echo(f"  ⏰ Timeouts: {timeouts}")
         click.echo(f"  📋 Total: {len(results)}")
         
-        if output_dir:
+        if output_dir or save:
             click.echo(f"\n💾 All outputs saved to: {output_path}")
         
         # Save results summary
-        if output_dir:
+        if output_dir or save:
             summary_file = os.path.join(output_path, f"execution_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(summary_file, 'w') as f:
                 json.dump([r.to_dict() for r in results], f, indent=2, default=str)
@@ -1376,6 +1426,118 @@ def run(ctx, command, accounts, output_dir, region, parallel, timeout, dry_run):
         click.echo(f"❌ Unexpected error: {e}", err=True)
         logger.exception("Unexpected error during command execution")
 
+
+@cli.command()
+@click.option('--team', help='Product team name to filter accounts')
+@click.pass_context
+def list_team_accounts(ctx,team):
+    """List accounts assigned to a specific product team"""
+    click.echo("📋 Listing accounts by product team")
+    
+    try:
+        # Get account manager
+        account_manager = get_account_manager(ctx)
+        
+        if not team:
+            click.echo("❌ Please specify a product team name using --team", err=True)
+            return
+        
+        # Load current account data
+        try:
+            account_collection = account_manager.data_manager.load_accounts()
+        except Exception as e:
+            click.echo(f"❌ Failed to load account data: {e}", err=True)
+            return
+        
+        team_accounts = account_manager.get_accounts_by_team(team)
+        
+        if not team_accounts:
+            click.echo(f"ℹ️  No accounts found for product team: {team}")
+            return
+        
+        click.echo(f"📊 Found {len(team_accounts)} account(s) for product team: {team}\n")
+        
+        for account in team_accounts:
+            click.echo(f"• {account.name} ({account.id}) - Profile: {account.profile_name or 'N/A'}")
+        
+    except AccountManagerError as e:
+        click.echo(f"❌ Team listing error: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during team listing")
+
+@cli.command()
+@click.option('--accounts', help='Comma-separated account IDs or file path to clean profiles for specific accounts')
+@click.option('--team', help='Product team name to assign to the accounts')
+def assign_team(accounts, team):
+    """Assign a product team to specified accounts"""
+    click.echo("🏷️  Assigning product team to accounts")
+    
+    try:
+        from config.manager import load_or_create_config
+        
+        if not accounts:
+            click.echo("❌ Please specify accounts using --accounts", err=True)
+            return
+        
+        if not team:
+            click.echo("❌ Please specify a product team name using --team", err=True)
+            return
+        
+        # Get account manager
+        config_manager = load_or_create_config()
+        account_manager = AccountManager(config_manager)
+        
+        # Parse account list
+        account_ids = parse_account_list(accounts)
+        if not account_ids:
+            click.echo("❌ No valid account IDs found", err=True)
+            return
+        
+        click.echo(f"📋 Processing {len(account_ids)} account(s)")
+        
+        # Load current account data
+        try:
+            account_collection = account_manager.data_manager.load_accounts()
+        except Exception as e:
+            click.echo(f"❌ Failed to load account data: {e}", err=True)
+            return
+        
+        updates_made = 0
+        
+        for account_id in account_ids:
+            account = account_collection.get_account(account_id)
+            if not account:
+                click.echo(f"⚠️  Account {account_id} not found in account data")
+                continue
+            
+            old_team = account.product_team
+            if old_team != team:
+                account.set_team(team)
+                click.echo(f"✅ Updated {account.name} ({account.id}): '{old_team}' -> '{team}'")
+                updates_made += 1
+            else:
+                click.echo(f"✓ {account.name} ({account.id}): product team already set to '{team}'")
+        
+        if updates_made > 0:
+            # Save the updated account collection
+            try:
+                account_manager.data_manager.save_accounts(account_collection)
+                click.echo(f"\n✅ Successfully updated {updates_made} account(s)")
+                click.echo(f"💾 Account data saved to: {account_manager.data_manager.file_path}")
+            except Exception as e:
+                click.echo(f"❌ Failed to save account data: {e}", err=True)
+                return
+        else:
+            click.echo("\n✅ No updates were necessary")
+        
+    except AccountManagerError as e:
+        click.echo(f"❌ Team assignment error: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during team assignment")
+        return
+    
 
 @cli.command()
 @click.option('--profiles', is_flag=True, help='Clean up generated profiles')

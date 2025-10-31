@@ -113,10 +113,19 @@ class AccountDataManager:
             
             # Save collection data
             data = collection.to_dict()
-            
             with open(self.file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            
+                f.flush()
+                os.fsync(f.fileno())
+            # Check that the files change timestamp to ensure write
+            if not self.file_path.exists() or self.file_path.stat().st_mtime == 0:
+                logger.warning(f"File {self.file_path} may not have been written correctly")
+                # Remove potentially corrupted file and save again
+                os.remove(self.file_path)
+                with open(self.file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
             # Set appropriate permissions (readable only by owner)
             os.chmod(self.file_path, 0o600)
             
