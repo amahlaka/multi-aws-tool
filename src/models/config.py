@@ -33,12 +33,22 @@ class SecurityConfig:
     allow_destructive_commands: bool = False
 
 @dataclass
+class LoggingConfig:
+    """Logging configuration settings"""
+    level: str = "INFO"
+    file: str = "~/.multi-aws/logs/multi-aws.log"
+    console: bool = True
+    max_size: int = 10  # MB
+    backup_count: int = 5
+
+@dataclass
 class MultiAWSConfig:
     """Complete MultiAWSTool configuration"""
     general: GeneralConfig
     output: OutputConfig
     execution: ExecutionConfig
     security: SecurityConfig
+    logging: LoggingConfig
     
     @classmethod
     def default(cls) -> 'MultiAWSConfig':
@@ -47,7 +57,8 @@ class MultiAWSConfig:
             general=GeneralConfig(),
             output=OutputConfig(),
             execution=ExecutionConfig(),
-            security=SecurityConfig()
+            security=SecurityConfig(),
+            logging=LoggingConfig()
         )
     
     @classmethod
@@ -71,6 +82,13 @@ class MultiAWSConfig:
             ),
             security=SecurityConfig(
                 allow_destructive_commands=config_manager.get_bool('security', 'allow-destructive-commands', False)
+            ),
+            logging=LoggingConfig(
+                level=config_manager.get('logging', 'level', 'INFO'),
+                file=config_manager.get('logging', 'file', '~/.multi-aws/logs/multi-aws.log'),
+                console=config_manager.get_bool('logging', 'console', True),
+                max_size=config_manager.get_int('logging', 'max-size', 10),
+                backup_count=config_manager.get_int('logging', 'backup-count', 5)
             )
         )
     
@@ -93,6 +111,13 @@ class MultiAWSConfig:
         
         # Security settings
         config_manager.set('security', 'allow-destructive-commands', str(self.security.allow_destructive_commands).lower())
+        
+        # Logging settings
+        config_manager.set('logging', 'level', self.logging.level)
+        config_manager.set('logging', 'file', self.logging.file)
+        config_manager.set('logging', 'console', str(self.logging.console).lower())
+        config_manager.set('logging', 'max-size', str(self.logging.max_size))
+        config_manager.set('logging', 'backup-count', str(self.logging.backup_count))
     
     def get_expanded_account_file_path(self) -> Path:
         """Get the account file path with expansions"""
@@ -101,6 +126,12 @@ class MultiAWSConfig:
     def get_expanded_output_path(self) -> Path:
         """Get the output path with expansions"""
         return Path(self.output.path).expanduser().resolve()
+    
+    def get_expanded_log_file_path(self) -> Path:
+        """Get the log file path with expansions"""
+        if not self.logging.file:
+            return None
+        return Path(self.logging.file).expanduser().resolve()
     
     def is_parallel_execution(self) -> bool:
         """Check if parallel execution is enabled"""

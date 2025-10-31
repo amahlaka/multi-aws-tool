@@ -11,6 +11,8 @@ from pathlib import Path
 from config.manager import load_or_create_config, ConfigurationError
 from aws.account_manager import AccountManager, AccountManagerError
 from utils.validators import parse_account_list
+from utils.logging_config import setup_logging_from_config
+from models.config import MultiAWSConfig
 
 # Setup basic logging
 logging.basicConfig(
@@ -36,6 +38,22 @@ class AppContext:
         try:
             # Load configuration
             self.config_manager = load_or_create_config()
+            
+            # Setup logging from configuration
+            try:
+                config = MultiAWSConfig.from_config_manager(self.config_manager)
+                
+                # Override log level to DEBUG if verbose mode is enabled
+                if verbose:
+                    config.logging.level = 'DEBUG'
+                
+                setup_logging_from_config(config)
+                logger.info("Logging configured from config file")
+            except Exception as e:
+                # Fallback to basic logging if config-based setup fails
+                logger.warning(f"Failed to setup logging from config, using defaults: {e}")
+                from utils.logging_config import setup_logging
+                setup_logging(logging.DEBUG if verbose else logging.INFO)
             
             # Get config values
             sso_session = self.config_manager.get('general', 'sso-session', 'default')
@@ -116,19 +134,21 @@ def sanitize_profile_name_component(name: str) -> str:
 @click.pass_context
 def cli(ctx, verbose):
     """MultiAWSTool - Multi-AWS Account Management Tool"""
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Verbose mode enabled")
-    
     # Initialize application context
     ctx.ensure_object(AppContext)
+    ctx.obj.verbose = verbose
+    
     try:
         ctx.obj.initialize(verbose=verbose)
     except Exception as e:
         # For some commands (like configure), we might not have a config yet
         # So we'll defer initialization to individual commands that need it
         logger.debug(f"Deferred context initialization: {e}")
-        ctx.obj.verbose = verbose
+        
+        # Set up basic logging for commands that don't have config yet
+        if verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.debug("Verbose mode enabled - using basic logging")
 
 @cli.command()
 def configure():
@@ -235,6 +255,40 @@ def configure():
             default=existing_config.security.allow_destructive_commands
         )
         
+        # Logging settings
+        click.echo("\n📋 Logging Settings:")
+        log_level = click.prompt(
+            "Log level",
+            type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], case_sensitive=False),
+            default=existing_config.logging.level,
+            show_default=True
+        )
+        
+        log_file = click.prompt(
+            "Log file path (empty to disable file logging)",
+            default=existing_config.logging.file,
+            show_default=True
+        )
+        
+        console_logging = click.confirm(
+            "Enable console logging",
+            default=existing_config.logging.console
+        )
+        
+        max_size = click.prompt(
+            "Maximum log file size (MB)",
+            type=int,
+            default=existing_config.logging.max_size,
+            show_default=True
+        )
+        
+        backup_count = click.prompt(
+            "Number of backup log files to keep",
+            type=int,
+            default=existing_config.logging.backup_count,
+            show_default=True
+        )
+        
         # Create new configuration
         new_config = MultiAWSConfig(
             general=existing_config.general.__class__(
@@ -254,6 +308,13 @@ def configure():
             ),
             security=existing_config.security.__class__(
                 allow_destructive_commands=allow_destructive
+            ),
+            logging=existing_config.logging.__class__(
+                level=log_level.upper(),
+                file=log_file if log_file.strip() else "",
+                console=console_logging,
+                max_size=max_size,
+                backup_count=backup_count
             )
         )
         

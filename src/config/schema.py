@@ -26,6 +26,13 @@ DEFAULT_CONFIG = {
     },
     'security': {
         'allow-destructive-commands': 'false'  # boolean stored as string
+    },
+    'logging': {
+        'level': 'INFO',  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+        'file': '~/.multi-aws/logs/multi-aws.log',  # Log file path
+        'console': 'true',  # Enable console logging
+        'max-size': '10',  # Max log file size in MB
+        'backup-count': '5'  # Number of backup log files to keep
     }
 }
 
@@ -68,6 +75,22 @@ stop-on-errors = {stop_on_errors}
 # Allow destructive commands (create, delete, modify operations)
 # Set to true to enable all AWS CLI commands
 allow-destructive-commands = {allow_destructive_commands}
+
+[logging]
+# Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+level = {level}
+
+# Log file path (use empty string to disable file logging)
+file = {file}
+
+# Enable console logging (true/false)
+console = {console}
+
+# Maximum log file size in MB
+max-size = {max_size}
+
+# Number of backup log files to keep
+backup-count = {backup_count}
 """
 
 # Read-only commands that are always allowed
@@ -122,6 +145,26 @@ def validate_output_format(format_str: str) -> bool:
 
 def validate_stop_on_errors(value: str) -> bool:
     """Validate stop-on-errors value"""
+    try:
+        int_val = int(value)
+        return int_val >= 0
+    except ValueError:
+        return False
+
+def validate_log_level(level: str) -> bool:
+    """Validate logging level value"""
+    return level.upper() in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+
+def validate_log_max_size(value: str) -> bool:
+    """Validate log max size value"""
+    try:
+        int_val = int(value)
+        return int_val > 0
+    except ValueError:
+        return False
+
+def validate_log_backup_count(value: str) -> bool:
+    """Validate log backup count value"""
     try:
         int_val = int(value)
         return int_val >= 0

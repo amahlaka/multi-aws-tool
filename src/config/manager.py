@@ -12,6 +12,7 @@ import logging
 from .schema import (
     DEFAULT_CONFIG, CONFIG_TEMPLATE, ConfigPaths,
     validate_execution_mode, validate_output_format, validate_stop_on_errors,
+    validate_log_level, validate_log_max_size, validate_log_backup_count,
     expand_path
 )
 
@@ -101,7 +102,12 @@ class ConfigManager:
                 'path': DEFAULT_CONFIG['output']['path'],
                 'mode': DEFAULT_CONFIG['execution']['mode'],
                 'stop_on_errors': DEFAULT_CONFIG['execution']['stop-on-errors'],
-                'allow_destructive_commands': DEFAULT_CONFIG['security']['allow-destructive-commands']
+                'allow_destructive_commands': DEFAULT_CONFIG['security']['allow-destructive-commands'],
+                'level': DEFAULT_CONFIG['logging']['level'],
+                'file': DEFAULT_CONFIG['logging']['file'],
+                'console': DEFAULT_CONFIG['logging']['console'],
+                'max_size': DEFAULT_CONFIG['logging']['max-size'],
+                'backup_count': DEFAULT_CONFIG['logging']['backup-count']
             }
             
             # Write template
@@ -176,6 +182,21 @@ class ConfigManager:
         if not validate_stop_on_errors(stop_errors):
             errors.append(f"Invalid stop-on-errors value: {stop_errors}. Must be a non-negative integer")
         
+        # Validate logging level
+        log_level = self.get('logging', 'level', 'INFO')
+        if not validate_log_level(log_level):
+            errors.append(f"Invalid log level: {log_level}. Must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+        
+        # Validate logging max-size
+        max_size = self.get('logging', 'max-size', '10')
+        if not validate_log_max_size(max_size):
+            errors.append(f"Invalid log max-size: {max_size}. Must be a positive integer")
+        
+        # Validate logging backup-count
+        backup_count = self.get('logging', 'backup-count', '5')
+        if not validate_log_backup_count(backup_count):
+            errors.append(f"Invalid log backup-count: {backup_count}. Must be a non-negative integer")
+        
         # Validate paths
         account_file = expand_path(self.get('general', 'account-file', ''))
         if account_file.parent and not account_file.parent.exists():
@@ -184,6 +205,13 @@ class ConfigManager:
         output_path = expand_path(self.get('output', 'path', ''))
         if output_path and not output_path.exists():
             warnings.append(f"Output directory does not exist: {output_path}")
+        
+        # Validate log file directory
+        log_file = self.get('logging', 'file', '')
+        if log_file:
+            log_path = expand_path(log_file)
+            if log_path.parent and not log_path.parent.exists():
+                warnings.append(f"Log file directory does not exist: {log_path.parent}")
         
         return {'errors': errors, 'warnings': warnings}
     
