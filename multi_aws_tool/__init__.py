@@ -16,7 +16,18 @@ from .aws.sso_client import SSOClient, SSOAuthenticationError
 from .config.manager import ConfigManager, ConfigurationError
 from .models.account import Account, AccountCollection, Role, AccountStatus
 from .models.config import MultiAWSConfig
+from .models.result import CommandResult, ResultStatus, ExecutionSummary
 from .utils.account_data import AccountDataManager, AccountDataError
+
+# Output parsing and analysis
+from .output import (
+    AccountResult, 
+    MultiAWSExecutionSummary,
+    OutputParser,
+    OutputAnalyzer,
+    parse_execution_summary,
+    analyze_execution_summary
+)
 
 # Convenience imports for common use cases
 __all__ = [
@@ -31,6 +42,17 @@ __all__ = [
     'Role',
     'AccountStatus',
     'MultiAWSConfig',
+    'CommandResult',
+    'ResultStatus',
+    'ExecutionSummary',
+    
+    # Output parsing and analysis
+    'AccountResult',
+    'MultiAWSExecutionSummary',
+    'OutputParser',
+    'OutputAnalyzer',
+    'parse_execution_summary',
+    'analyze_execution_summary',
     
     # Utility classes
     'AccountDataManager',

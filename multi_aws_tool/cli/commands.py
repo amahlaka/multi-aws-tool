@@ -6,6 +6,7 @@ import click
 import logging
 import sys
 from pathlib import Path
+import os
 
 # Import dependencies at module level
 from ..config.manager import load_or_create_config, ConfigurationError
@@ -30,14 +31,21 @@ class AppContext:
         self.config_manager = None
         self.account_manager = None
         self.verbose = False
+        self.max_content_width = 120
+        self.terminal_width = 120
 
     def initialize(self, verbose=False):
         """Initialize the application context"""
         self.verbose = verbose
-        
+        columns, lines = os.get_terminal_size()
+        self.max_content_width = columns
+        self.terminal_width = columns
+        print("SET SIZE:", columns)
         try:
             # Load configuration
             self.config_manager = load_or_create_config()
+
+
             
             # Setup logging from configuration
             try:
@@ -128,16 +136,24 @@ def sanitize_profile_name_component(name: str) -> str:
     sanitized = '-'.join(filter(None, sanitized.split('-')))
     return sanitized
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.1.0")
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 @click.pass_context
-def cli(ctx, verbose):
+def cli(ctx: click.Context, verbose):
     """MultiAWSTool - Multi-AWS Account Management Tool"""
     # Initialize application context
     ctx.ensure_object(AppContext)
     ctx.obj.verbose = verbose
-    
+    columns, lines = os.get_terminal_size()
+    ctx.max_content_width = columns
+    ctx.terminal_width = columns
+    ctx.obj.max_content_width = columns
+    ctx.obj.terminal_width = columns
+    ctx.color = True
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit()
     try:
         ctx.obj.initialize(verbose=verbose)
     except Exception as e:
@@ -1161,12 +1177,13 @@ def clean_duplicates(dry_run, prefix_only):
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
 @click.argument('command', nargs=-1)
 @click.pass_context
-def run(ctx, command: tuple, accounts, team, output_dir, region, parallel, timeout, dry_run, save, verbose):
+def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
     click.echo(f"Selected team: {team}")
     click.echo("Using each account's configured profile")
+    print(ctx.max_content_width)
     
     try:
         from models.result import CommandResult, ResultStatus
@@ -1298,6 +1315,7 @@ def run(ctx, command: tuple, accounts, team, output_dir, region, parallel, timeo
                 command_result = CommandResult(
                     account_id=account.id,
                     command=command,
+                    team=account.product_team if account.product_team else "N/A",
                     status=ResultStatus.SUCCESS if result.returncode == 0 else ResultStatus.ERROR,
                     output=result.stdout,
                     error=result.stderr,
@@ -1530,12 +1548,16 @@ def list_team_accounts(ctx,team):
 @cli.command()
 @click.option('--accounts', help='Comma-separated account IDs or file path to clean profiles for specific accounts')
 @click.option('--team', help='Product team name to assign to the accounts')
-def assign_team(accounts, team):
+@click.option('--overwrite', is_flag=True, help='Overwrite existing team assignments')
+@click.pass_context
+def assign_team(ctx, accounts, team, overwrite):
     """Assign a product team to specified accounts"""
     click.echo("🏷️  Assigning product team to accounts")
     
     try:
-        from config.manager import load_or_create_config
+        # Get account manager
+        account_manager: AccountManager = get_account_manager(ctx)
+
         
         if not accounts:
             click.echo("❌ Please specify accounts using --accounts", err=True)
@@ -1546,8 +1568,6 @@ def assign_team(accounts, team):
             return
         
         # Get account manager
-        config_manager = load_or_create_config()
-        account_manager = AccountManager(config_manager)
         
         # Parse account list
         account_ids = parse_account_list(accounts)
@@ -1573,13 +1593,15 @@ def assign_team(accounts, team):
                 continue
             
             old_team = account.product_team
-            if old_team != team:
+            if old_team != team and (overwrite or not old_team):
                 account.set_team(team)
                 click.echo(f"✅ Updated {account.name} ({account.id}): '{old_team}' -> '{team}'")
                 updates_made += 1
             else:
-                click.echo(f"✓ {account.name} ({account.id}): product team already set to '{team}'")
-        
+                if overwrite:
+                    click.echo(f"✓ {account.name} ({account.id}): product team already set to '{team}'")
+                else:
+                    click.echo(f"✓ {account.name} ({account.id}): product team already set as '{old_team}' and overwrite not enabled, skipping")
         if updates_made > 0:
             # Save the updated account collection
             try:
