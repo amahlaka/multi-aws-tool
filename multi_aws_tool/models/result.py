@@ -22,6 +22,7 @@ class CommandResult:
     account_id: str
     command: str
     status: ResultStatus
+    team: Optional[str] = None
     output: Optional[str] = None
     error: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
@@ -81,7 +82,8 @@ class CommandResult:
             'error': self.error,
             'timestamp': self.timestamp.isoformat(),
             'execution_time': self.execution_time,
-            'exit_code': self.exit_code
+            'exit_code': self.exit_code,
+            'team': self.team
         }
     
     @classmethod

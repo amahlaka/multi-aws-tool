@@ -1306,7 +1306,6 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                     text=True,
                     timeout=timeout
                 )
-                print(result.args)
                 
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()

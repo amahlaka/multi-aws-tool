@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 multi-aws = "multi_aws_tool.main:main"
+mat-parse = "mat_parse.cli:main"
 
 
 [build-system]

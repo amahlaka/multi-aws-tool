@@ -161,7 +161,7 @@ class OutputParser:
             json.JSONDecodeError: If file is not valid JSON
             KeyError: If required fields are missing
         """
-        file_path = Path(file_path)
+        file_path = Path(file_path).expanduser()
         if not file_path.is_absolute() and self.output_directory:
             file_path = self.output_directory / file_path
         

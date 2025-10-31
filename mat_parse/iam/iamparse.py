@@ -30,6 +30,7 @@ class IAMUser:
         self.access_key_2_active = row['access_key_2_active'].lower() == 'true'
         self.access_key_2_last_used = self._parse_date(row['access_key_2_last_used_date'])
         self.access_key_2_last_rotated = self._parse_date(row['access_key_2_last_rotated'])
+        self.product_team = "Unknown"  # Default value, will be set by AccountNameResolver
         
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         """Parse ISO date string to datetime object."""
@@ -153,6 +154,7 @@ class AccountNameResolver:
             self.accounts_file = Path.home() / '.multi-aws' / 'accounts.json'
         
         self.account_names = {}
+        self.team_mapping = {}
         self._load_account_names()
     
     def _load_account_names(self) -> None:
@@ -168,6 +170,10 @@ class AccountNameResolver:
                     for account in data['accounts']:
                         if isinstance(account, dict) and 'id' in account and 'name' in account:
                             self.account_names[account['id']] = account['name']
+                            if 'product_team' in account:
+                                self.team_mapping[account['id']] = account['product_team']
+                            
+                            
                             
                 print(f"Loaded {len(self.account_names)} account names from {self.accounts_file}")
             else:
@@ -185,7 +191,11 @@ class AccountNameResolver:
         if name and name != account_id:
             return f"{name} ({account_id})"
         return account_id
-
+    def get_team_name(self, account_id: str) -> str:
+        """Get the team name for an account ID, or return 'Unknown' if not found."""
+        # This method assumes that the product team information is stored alongside account names
+        # in the accounts.json file. Adjust as necessary based on actual data structure.
+        return self.team_mapping.get(account_id, "Unknown")
 
 class IAMReportParser:
     """Main class for parsing IAM credential reports."""
@@ -202,7 +212,7 @@ class IAMReportParser:
         if self.execution_summary_file:
             self._process_execution_summary()
         
-        csv_files = list(self.reports_directory.glob("iam_report_*.csv"))
+        csv_files = list(self.reports_directory.glob("*.csv"))
         
         if not csv_files:
             print(f"No IAM report CSV files found in {self.reports_directory}")
@@ -265,6 +275,13 @@ class IAMReportParser:
     def generate_summary_report(self, inactive_days: int = 90) -> Dict:
         """Generate a comprehensive summary report."""
         inactive_users = self.find_inactive_users_with_credentials(inactive_days)
+        # Group by product team
+        teams = {}
+        for user in inactive_users:
+            team_name = self.account_resolver.get_team_name(user.account_id)
+            if team_name not in teams:
+                teams[team_name] = []
+            teams[team_name].append(user)
         
         # Group by account
         accounts = {}
@@ -284,7 +301,8 @@ class IAMReportParser:
             'total_users': total_users,
             'users_with_credentials': users_with_credentials,
             'inactive_users_with_credentials': len(inactive_users),
-            'accounts': accounts
+            'accounts': accounts,
+            'teams': teams
         }
     
     def print_human_readable_report(self, inactive_days: int = 90) -> None:
@@ -329,6 +347,14 @@ class IAMReportParser:
                 print(f"     Access Key 1: {creds['access_key_1_active']} (Last used: {creds['access_key_1_last_used']})")
                 print(f"     Access Key 2: {creds['access_key_2_active']} (Last used: {creds['access_key_2_last_used']})")
                 print()
+
+        print("Teams:")
+        for team_name, users in report['teams'].items():
+            print(f"  • {team_name}: {len(users)} inactive users with credentials")
+            for user in users:
+                print(f"      - {user.user} (Account: {self.account_resolver.get_account_display_name(user.account_id)})")
+        print("="*80 + "\n")
+
     
     def export_json_report(self, output_file: str, inactive_days: int = 90) -> None:
         """Export report as JSON file."""
