@@ -8,8 +8,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
 
-from models.account import Account, Role, AccountCollection, AccountStatus
-from models.result import CommandResult, ExecutionSummary, ResultStatus
+from ..models.account import Account, Role, AccountCollection, AccountStatus
+from ..models.result import CommandResult, ExecutionSummary, ResultStatus
 
 class ValidationError(Exception):
     """Raised when data model validation fails"""

@@ -7,9 +7,9 @@ import logging
 from typing import List, Optional, Dict
 from datetime import datetime
 
-from aws.sso_client import SSOClient, SSOAuthenticationError
-from models.account import Account, AccountCollection, AccountStatus, Role
-from utils.account_data import AccountDataManager, AccountDataError
+from .sso_client import SSOClient, SSOAuthenticationError
+from ..models.account import Account, AccountCollection, AccountStatus, Role
+from ..utils.account_data import AccountDataManager, AccountDataError
 
 logger = logging.getLogger(__name__)
 

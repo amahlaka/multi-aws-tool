@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 
 # Import dependencies at module level
-from config.manager import load_or_create_config, ConfigurationError
-from aws.account_manager import AccountManager, AccountManagerError
-from utils.validators import parse_account_list
-from utils.logging_config import setup_logging_from_config
-from models.config import MultiAWSConfig
+from ..config.manager import load_or_create_config, ConfigurationError
+from ..aws.account_manager import AccountManager, AccountManagerError
+from ..utils.validators import parse_account_list
+from ..utils.logging_config import setup_logging_from_config
+from ..models.config import MultiAWSConfig
 
 # Setup basic logging
 logging.basicConfig(

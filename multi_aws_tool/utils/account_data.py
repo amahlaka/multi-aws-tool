@@ -10,7 +10,7 @@ from typing import Optional, List
 import logging
 from datetime import datetime
 
-from models.account import Account, AccountCollection, Role
+from ..models.account import Account, AccountCollection, Role
 
 logger = logging.getLogger(__name__)
 
