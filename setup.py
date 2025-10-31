@@ -12,7 +12,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="multi-aws-tool",
-    version="0.1.1",
+    version="0.1.2",
     author="Arttu Mahlakaarto",
     author_email="arttu.mahlakaarto@vaisala.com",
     description="A command-line tool for managing multiple AWS accounts through AWS SSO",

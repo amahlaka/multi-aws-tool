@@ -2,6 +2,6 @@
 MultiAWSTool - Multi-AWS Account Management Tool
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __author__ = "Arttu Mahlakaarto"
 __email__ = "arttu.mahlakaarto@vaisala.com"

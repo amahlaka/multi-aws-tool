@@ -1098,7 +1098,7 @@ def clean_duplicates(dry_run, prefix_only):
 @click.option('--parallel', is_flag=True, help='Execute commands in parallel')
 @click.option('--timeout', type=int, default=300, help='Command timeout in seconds')
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
-@click.argument('command', nargs=-1, help="AWS CLI command to execute, put -- before the command ")
+@click.argument('command', nargs=-1)
 @click.pass_context
 def run(ctx, command: tuple, accounts, team, output_dir, region, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
