@@ -68,3 +68,4 @@ config.ini
 *.key
 *.pem
 *.txt
+filter.json

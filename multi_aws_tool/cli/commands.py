@@ -1733,5 +1733,46 @@ def cleanup(profiles, tokens, accounts, all, confirm):
         click.echo(f"❌ Cleanup error: {e}", err=True)
         logger.exception("Unexpected error during cleanup")
 
+
+@cli.command()
+@click.option('--shell', type=click.Choice(['bash', 'zsh', 'fish']), 
+              help='Shell type for completion script')
+def completion(shell):
+    """Generate shell completion script for multi-aws command."""
+    if not shell:
+        # Try to detect shell from environment
+        import os
+        shell_env = os.environ.get('SHELL', '').split('/')[-1]
+        if shell_env in ['bash', 'zsh', 'fish']:
+            shell = shell_env
+        else:
+            shell = 'bash'  # default fallback
+    
+    click.echo(f"# Shell completion for multi-aws command ({shell})")
+    click.echo("# Add this to your shell configuration file:")
+    click.echo()
+    
+    if shell == 'bash':
+        click.echo("# For bash, add to ~/.bashrc or ~/.bash_profile:")
+        click.echo('eval "$(_MULTI_AWS_COMPLETE=bash_source multi-aws)"')
+    elif shell == 'zsh':
+        click.echo("# For zsh, add to ~/.zshrc:")
+        click.echo('eval "$(_MULTI_AWS_COMPLETE=zsh_source multi-aws)"')
+    elif shell == 'fish':
+        click.echo("# For fish, add to ~/.config/fish/completions/multi-aws.fish:")
+        click.echo('eval (env _MULTI_AWS_COMPLETE=fish_source multi-aws)')
+    
+    click.echo()
+    click.echo("# Or run this command to install completion directly:")
+    if shell == 'bash':
+        click.echo('_MULTI_AWS_COMPLETE=bash_source multi-aws > ~/.multi-aws-completion.bash')
+        click.echo('echo "source ~/.multi-aws-completion.bash" >> ~/.bashrc')
+    elif shell == 'zsh':
+        click.echo('_MULTI_AWS_COMPLETE=zsh_source multi-aws > ~/.multi-aws-completion.zsh')
+        click.echo('echo "source ~/.multi-aws-completion.zsh" >> ~/.zshrc')
+    elif shell == 'fish':
+        click.echo('_MULTI_AWS_COMPLETE=fish_source multi-aws > ~/.config/fish/completions/multi-aws.fish')
+
+
 if __name__ == '__main__':
     cli()
