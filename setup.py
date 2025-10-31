@@ -12,13 +12,13 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="multi-aws-tool",
-    version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    version="0.1.1",
+    author="Arttu Mahlakaarto",
+    author_email="arttu.mahlakaarto@vaisala.com",
     description="A command-line tool for managing multiple AWS accounts through AWS SSO",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/MultiAWSTool",
+    url="https://github.com/arttu-mahlakaarto_vai/multi-aws-tool",
     packages=find_packages(include=['src', 'src.*']),
     package_dir={'': '.'},
     classifiers=[
