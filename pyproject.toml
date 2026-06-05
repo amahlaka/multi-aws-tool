@@ -2,6 +2,7 @@
 name = "multi-aws-tool"
 version = "0.1.1"
 description = "Multi AWS tool for managing operations across multiple AWS accounts via SSO"
+readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "click>=8.1",
@@ -11,6 +12,10 @@ dependencies = [
     "colorama>=0.4.0",
     "tabulate>=0.9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/amahlaka/multi-aws-tool"
+Repository = "https://github.com/amahlaka/multi-aws-tool"
 
 [project.scripts]
 multi-aws = "multi_aws_tool.main:main"

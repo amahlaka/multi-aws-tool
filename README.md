@@ -36,6 +36,12 @@ multi-aws --help
 multi-aws configure
 ```
 
+## Publishing
+
+PyPI publishing is handled by GitHub Actions. Publishing a GitHub release, or manually running the `Publish to PyPI` workflow, builds the package and uploads the generated distributions to PyPI using trusted publishing.
+
+Before the workflow can publish successfully, configure the `amahlaka/multi-aws-tool` repository as a trusted publisher in PyPI and allow the `pypi` GitHub Actions environment to deploy.
+
 ### Option 2: Development Setup
 
 For development or if you prefer to run directly:
