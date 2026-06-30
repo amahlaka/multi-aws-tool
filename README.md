@@ -36,11 +36,6 @@ multi-aws --help
 multi-aws configure
 ```
 
-## Publishing
-
-PyPI publishing is handled by GitHub Actions. Publishing a GitHub release, or manually running the `Publish to PyPI` workflow, builds the package and uploads the generated distributions to PyPI using trusted publishing.
-
-Before the workflow can publish successfully, configure the `amahlaka/multi-aws-tool` repository as a trusted publisher in PyPI and allow the `pypi` GitHub Actions environment to deploy.
 
 ### Option 2: Development Setup
 
@@ -191,7 +186,7 @@ The tool creates a configuration file at `~/.multi-aws/config.ini` with comprehe
 - Account data file location
 
 **Output Settings**:
-- Filename pattern with placeholders (`!A`=account-name, `!c`=command, `!d`=date)
+- Filename pattern with placeholders (see [Filename Pattern Placeholders](#filename-pattern-placeholders))
 - Output format (json, yaml, txt, csv)
 - Output directory path
 
@@ -289,6 +284,42 @@ MultiAWSTool generates structured output files that can be easily parsed by othe
 ├── staging-account-sts-get-caller-identity-20251031.json
 └── dev-account-sts-get-caller-identity-20251031.json
 ```
+
+### Filename Pattern Placeholders
+
+The `pattern` setting in `[output]` controls how individual output files are named. Combine placeholders freely; slashes (`/`) create subdirectories.
+
+| Placeholder | Description | Example value |
+|-------------|-------------|---------------|
+| `!a` | AWS account ID | `123456789012` |
+| `!A` | Account name (spaces and `/` replaced with `_`) | `production_account` |
+| `!c` | AWS service + operation joined with `-` | `ec2-describe-instances` |
+| `!S` | AWS service only | `ec2` |
+| `!C` | AWS operation only | `describe-instances` |
+| `!r` | IAM role (last segment of the profile name) | `PowerUserAccess` |
+| `!p` | Product team (spaces and `/` replaced with `_`) | `backend_team` |
+| `!R` | AWS region the command ran in | `eu-west-1` |
+| `!d` | Date (`YYYYMMDD`) | `20251031` |
+| `!t` | Time (`HHMMSS`) | `143022` |
+| `!s` | Full timestamp (`YYYYMMDD_HHMMSS`) | `20251031_143022` |
+
+**Examples**:
+
+```ini
+# Default: account name, command, date
+pattern = !A-!c-!d
+
+# Include region — useful with --all-regions
+pattern = !A/!R/!c-!d
+
+# Role-based subdirectories
+pattern = !r/!A-!c-!d
+
+# Fully qualified with timestamp
+pattern = !A-!R-!c-!s
+```
+
+> **Tip**: Use `/` in the pattern to create subdirectories under the output path, e.g. `!A/!R/!c-!d` produces `<output-dir>/my-account/eu-west-1/ec2-describe-instances-20251031.json`.
 
 ## Troubleshooting
 
