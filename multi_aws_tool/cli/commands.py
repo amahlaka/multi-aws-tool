@@ -1254,8 +1254,13 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
             click.echo("🌍 Fetching available AWS regions...")
             try:
                 region_result = subprocess.run(
-                    ['aws', '--profile', valid_accounts[0].profile_name,
-                     'ec2', 'describe-regions', '--query', 'Regions[].RegionName', '--output', 'json'],
+                    [
+                        'aws', '--profile', valid_accounts[0].profile_name,
+                        '--region', config_region,
+                        'ec2', 'describe-regions',
+                        '--filters', 'Name=opt-in-status,Values=opt-in-not-required,opted-in',
+                        '--query', 'Regions[].RegionName', '--output', 'json'
+                    ],
                     capture_output=True, text=True, timeout=30
                 )
                 if region_result.returncode == 0:
