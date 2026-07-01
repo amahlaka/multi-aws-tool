@@ -1172,12 +1172,13 @@ def clean_duplicates(dry_run, prefix_only):
 @click.option('--verbose', is_flag=True, help='Enable verbose output')
 @click.option('--save' , is_flag=True, help='Save command outputs to files')
 @click.option('--region', help='AWS region override')
+@click.option('--all-regions', is_flag=True, help='Run command on all available AWS regions')
 @click.option('--parallel', is_flag=True, help='Execute commands in parallel')
 @click.option('--timeout', type=int, default=300, help='Command timeout in seconds')
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
 @click.argument('command', nargs=-1)
 @click.pass_context
-def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, parallel, timeout, dry_run, save, verbose):
+def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
@@ -1195,6 +1196,9 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         if not accounts and not team:
             click.echo("❌ You must specify either --accounts or --team to select accounts", err=True)
             return
+        if all_regions and region:
+            click.echo("⚠️  --all-regions and --region are mutually exclusive; ignoring --region")
+            region = None
         # Get configuration values
         config_manager = ctx.obj.config_manager or load_or_create_config()
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
@@ -1244,7 +1248,34 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         if not valid_accounts:
             click.echo("❌ No valid accounts with configured profiles found", err=True)
             return
-        
+
+        # Determine regions to run on
+        if all_regions:
+            click.echo("🌍 Fetching available AWS regions...")
+            try:
+                region_result = subprocess.run(
+                    [
+                        'aws', '--profile', valid_accounts[0].profile_name,
+                        '--region', config_region,
+                        'ec2', 'describe-regions',
+                        '--filters', 'Name=opt-in-status,Values=opt-in-not-required,opted-in',
+                        '--query', 'Regions[].RegionName', '--output', 'json'
+                    ],
+                    capture_output=True, text=True, timeout=30
+                )
+                if region_result.returncode == 0:
+                    regions_to_run = sorted(json.loads(region_result.stdout))
+                    click.echo(f"🌍 Running across {len(regions_to_run)} region(s): {', '.join(regions_to_run)}")
+                else:
+                    click.echo(f"⚠️  Could not fetch regions: {region_result.stderr.strip()}")
+                    click.echo(f"   Falling back to configured region: {config_region}")
+                    regions_to_run = [config_region]
+            except Exception as e:
+                click.echo(f"⚠️  Failed to fetch regions: {e}")
+                regions_to_run = [config_region]
+        else:
+            regions_to_run = [config_region]
+
         # Prepare output directory
         if output_dir:
             output_path = os.path.expanduser(output_dir)
@@ -1258,10 +1289,10 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         
         command_list = list(command)
 
-        def execute_command_for_account(account):
-            """Execute command for a single account using its configured profile"""
+        def execute_command_for_account(account, region):
+            """Execute command for a single account and region using its configured profile"""
             profile_name = account.profile_name
-            
+
             if not profile_name:
                 click.echo(f"❌ {account.name}: No profile configured")
                 return CommandResult(
@@ -1275,7 +1306,7 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                 )
             aws_command = [
                 'aws', '--profile', profile_name,
-                '--region', config_region,
+                '--region', region,
                 '--output', output_format,
             ]
             for cmd_part in command_list:
@@ -1286,7 +1317,7 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
             start_time = datetime.now()
             
             try:
-                click.echo(f"🔄 Executing on {account.name} ({account.id})...")
+                click.echo(f"🔄 Executing on {account.name} ({account.id}) in {region}...")
                 if dry_run:
                     click.echo(f"   Dry run: {' '.join(aws_command)}")
                     return CommandResult(
@@ -1375,6 +1406,7 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                     filename_base = filename_base.replace('!S', command_name_parts[0] if command_name_parts else 'unknown-service')
                     filename_base = filename_base.replace('!C', command_name_parts[1] if len(command_name_parts) > 1 else 'unknown-operation')
                     filename_base = filename_base.replace('!p', account.product_team.replace(' ', '_').replace('/', '_') if account.product_team else 'unknown-team')
+                    filename_base = filename_base.replace('!R', region)
                     filename = f"{filename_base}.{output_format}"
                     
                     #If format is set, validate that the data is in that format
@@ -1454,25 +1486,26 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                 )
         
         # Execute commands
+        execution_pairs = [(account, rgn) for account in valid_accounts for rgn in regions_to_run]
         results = []
-        
-        if parallel and len(valid_accounts) > 1:
-            click.echo(f"🚀 Executing commands in parallel...")
-            
-            with ThreadPoolExecutor(max_workers=min(len(valid_accounts), 10)) as executor:
-                future_to_account = {
-                    executor.submit(execute_command_for_account, account): account 
-                    for account in valid_accounts
+
+        if parallel and len(execution_pairs) > 1:
+            click.echo(f"🚀 Executing commands in parallel across {len(valid_accounts)} account(s) and {len(regions_to_run)} region(s)...")
+
+            with ThreadPoolExecutor(max_workers=min(len(execution_pairs), 10)) as executor:
+                future_to_pair = {
+                    executor.submit(execute_command_for_account, account, rgn): (account, rgn)
+                    for account, rgn in execution_pairs
                 }
-                
-                for future in as_completed(future_to_account):
+
+                for future in as_completed(future_to_pair):
                     result = future.result()
                     results.append(result)
         else:
-            click.echo(f"📋 Executing commands sequentially...")
-            
-            for account in valid_accounts:
-                result = execute_command_for_account(account)
+            click.echo(f"📋 Executing commands sequentially across {len(valid_accounts)} account(s) and {len(regions_to_run)} region(s)...")
+
+            for account, rgn in execution_pairs:
+                result = execute_command_for_account(account, rgn)
                 results.append(result)
         
         # Summary
