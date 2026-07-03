@@ -1681,23 +1681,44 @@ def assign_team(ctx, accounts, team, overwrite):
     
 
 @cli.command('sync-tags')
-@click.option('--profile', default=None,
-              help='AWS profile with Organizations access (management / delegated-admin account). '
-                   'If omitted, the default credential chain is used.')
+@click.option('--account', 'account_id', default=None,
+              help='Account ID of the management or delegated-admin account to use for '
+                   'Organizations access. The account must already be configured with a '
+                   'profile (run \'profiles\' first). If omitted, the default credential '
+                   'chain is used.')
 @click.pass_context
-def sync_tags(ctx, profile):
+def sync_tags(ctx, account_id):
     """Sync account tags from AWS Organizations"""
     click.echo("🏷️  Syncing account tags from AWS Organizations")
 
     try:
         account_manager = get_account_manager(ctx)
 
-        if profile:
-            click.echo(f"🔑 Using profile '{profile}' for Organizations access")
+        profile_name = None
+        if account_id:
+            account = account_manager.get_account(account_id)
+            if not account:
+                click.echo(
+                    f"❌ Account '{account_id}' not found. Run 'init' to discover accounts.",
+                    err=True,
+                )
+                return
+            if not account.profile_name:
+                click.echo(
+                    f"❌ No profile configured for account {account_id} ({account.name}).\n"
+                    f"   Run 'profiles --accounts {account_id} --role <role-name>' first.",
+                    err=True,
+                )
+                return
+            profile_name = account.profile_name
+            click.echo(
+                f"🔑 Using account {account_id} ({account.name}) "
+                f"with profile '{profile_name}' for Organizations access"
+            )
         else:
             click.echo("🔑 Using default credentials for Organizations access")
 
-        counts = account_manager.sync_account_tags(profile_name=profile)
+        counts = account_manager.sync_account_tags(profile_name=profile_name)
 
         synced = counts['synced']
         skipped = counts['skipped']
@@ -1715,10 +1736,10 @@ def sync_tags(ctx, profile):
             click.echo(
                 "\nℹ️  No tags were found. Possible reasons:\n"
                 "  • The account(s) have no tags in AWS Organizations\n"
-                "  • The profile/credentials do not have Organizations access\n"
+                "  • The credentials do not have Organizations access\n"
                 "  • Your organization does not use account tags\n"
-                "Try specifying --profile with an account that has "
-                "organizations:ListTagsForResource permission."
+                "Try specifying --account with a management or delegated-admin account ID "
+                "that has organizations:ListTagsForResource permission."
             )
         elif synced > 0:
             click.echo(f"\n💾 Tag data saved to: {account_manager.data_manager.file_path}")
