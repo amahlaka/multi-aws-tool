@@ -1168,6 +1168,8 @@ def clean_duplicates(dry_run, prefix_only):
 @cli.command()
 @click.option('--accounts', help='Comma-separated account IDs or file path')
 @click.option('--team', help='Team name(s) to select accounts from')
+@click.option('--tag', 'tags', multiple=True, metavar='KEY=VALUE',
+              help='Filter accounts by tag (format: key=value). Can be specified multiple times.')
 @click.option('--output-dir', help='Directory to save output files')
 @click.option('--verbose', is_flag=True, help='Enable verbose output')
 @click.option('--save' , is_flag=True, help='Save command outputs to files')
@@ -1178,7 +1180,7 @@ def clean_duplicates(dry_run, prefix_only):
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
 @click.argument('command', nargs=-1)
 @click.pass_context
-def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
+def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
@@ -1193,8 +1195,8 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         import json
         from datetime import datetime
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        if not accounts and not team:
-            click.echo("❌ You must specify either --accounts or --team to select accounts", err=True)
+        if not accounts and not team and not tags:
+            click.echo("❌ You must specify --accounts, --team, or --tag to select accounts", err=True)
             return
         if all_regions and region:
             click.echo("⚠️  --all-regions and --region are mutually exclusive; ignoring --region")
@@ -1205,6 +1207,15 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         output_format = config_manager.get('output', 'format', 'json')
         output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
         
+        # Parse tag filters
+        tag_filter: dict = {}
+        for tag_item in (tags or []):
+            if '=' not in tag_item:
+                click.echo(f"❌ Invalid tag format: '{tag_item}'. Use key=value format.", err=True)
+                return
+            k, v = tag_item.split('=', 1)
+            tag_filter[k.strip()] = v.strip()
+
         # Parse account list
         account_manager = get_account_manager(ctx)
         if team:
@@ -1216,8 +1227,23 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                 for acc in team_accounts:
                     if acc.id not in account_ids:
                         account_ids.append(acc.id)
-        else:
+        elif accounts:
             account_ids = parse_account_list(accounts)
+        else:
+            # tag-only selection: use all accounts
+            account_ids = [acc.id for acc in account_manager.get_accounts()]
+
+        # Apply tag filter if provided
+        if tag_filter:
+            if tag_filter:
+                click.echo(
+                    f"🏷️  Filtering by tag(s): "
+                    + ", ".join(f"{k}={v}" for k, v in tag_filter.items())
+                )
+            tagged_ids = {
+                acc.id for acc in account_manager.get_accounts_by_tags(tag_filter)
+            }
+            account_ids = [aid for aid in account_ids if aid in tagged_ids]
                 
         if not account_ids:
             click.echo("❌ No valid account IDs found", err=True)
@@ -1653,6 +1679,56 @@ def assign_team(ctx, accounts, team, overwrite):
         logger.exception("Unexpected error during team assignment")
         return
     
+
+@cli.command('sync-tags')
+@click.option('--profile', default=None,
+              help='AWS profile with Organizations access (management / delegated-admin account). '
+                   'If omitted, the default credential chain is used.')
+@click.pass_context
+def sync_tags(ctx, profile):
+    """Sync account tags from AWS Organizations"""
+    click.echo("🏷️  Syncing account tags from AWS Organizations")
+
+    try:
+        account_manager = get_account_manager(ctx)
+
+        if profile:
+            click.echo(f"🔑 Using profile '{profile}' for Organizations access")
+        else:
+            click.echo("🔑 Using default credentials for Organizations access")
+
+        counts = account_manager.sync_account_tags(profile_name=profile)
+
+        synced = counts['synced']
+        skipped = counts['skipped']
+        failed = counts['failed']
+
+        click.echo(f"\n📊 Tag sync results:")
+        if synced:
+            click.echo(f"  ✅ Synced tags for {synced} account(s)")
+        if skipped:
+            click.echo(f"  ⚪ No tags found for {skipped} account(s)")
+        if failed:
+            click.echo(f"  ❌ Failed for {failed} account(s)")
+
+        if synced == 0 and skipped > 0 and failed == 0:
+            click.echo(
+                "\nℹ️  No tags were found. Possible reasons:\n"
+                "  • The account(s) have no tags in AWS Organizations\n"
+                "  • The profile/credentials do not have Organizations access\n"
+                "  • Your organization does not use account tags\n"
+                "Try specifying --profile with an account that has "
+                "organizations:ListTagsForResource permission."
+            )
+        elif synced > 0:
+            click.echo(f"\n💾 Tag data saved to: {account_manager.data_manager.file_path}")
+
+    except AccountManagerError as e:
+        click.echo(f"❌ Tag sync error: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during tag sync")
+
 
 @cli.command()
 @click.option('--profiles', is_flag=True, help='Clean up generated profiles')

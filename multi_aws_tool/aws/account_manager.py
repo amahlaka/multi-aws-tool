@@ -8,6 +8,7 @@ from typing import List, Optional, Dict
 from datetime import datetime
 
 from .sso_client import SSOClient, SSOAuthenticationError
+from .organizations_client import OrganizationsClient, OrganizationsAccessError
 from ..models.account import Account, AccountCollection, AccountStatus, Role
 from ..utils.account_data import AccountDataManager, AccountDataError
 
@@ -300,6 +301,94 @@ class AccountManager:
         """
         accounts = self.get_active_accounts()
         return [account for account in accounts if account.has_role(role_name)]
+    
+    def get_accounts_by_tags(self, tags: Dict[str, str]) -> List[Account]:
+        """
+        Get accounts that match all specified tags.
+
+        Args:
+            tags: Dict of tag key/value pairs that accounts must have
+
+        Returns:
+            List of accounts matching all supplied tags
+        """
+        collection = self.data_manager.load_accounts()
+        return collection.get_accounts_by_tags(tags)
+
+    def sync_account_tags(self, profile_name: Optional[str] = None) -> Dict[str, int]:
+        """
+        Sync account tags from AWS Organizations and persist them locally.
+
+        Fetches tags for every account in the local data file using the
+        Organizations ``list_tags_for_resource`` API.  Falls back cleanly
+        when Organizations access is unavailable for any account.
+
+        Args:
+            profile_name: AWS profile with Organizations access (management /
+                          delegated-admin account).  If *None*, the default
+                          credential chain is used.
+
+        Returns:
+            Dict with keys ``synced``, ``skipped``, and ``failed`` containing
+            the respective per-account counts.
+
+        Raises:
+            AccountManagerError: If the account data cannot be saved.
+        """
+        collection = self.data_manager.load_accounts()
+        accounts = collection.accounts
+
+        if not accounts:
+            logger.info("No accounts in local data; nothing to sync")
+            return {'synced': 0, 'skipped': 0, 'failed': 0}
+
+        org_client = OrganizationsClient(profile_name=profile_name)
+
+        synced = 0
+        skipped = 0
+        failed = 0
+
+        for account in accounts:
+            try:
+                tags = org_client.get_tags_for_account(account.id)
+                if tags:
+                    account.tags = tags
+                    account.last_updated = datetime.now()
+                    synced += 1
+                    logger.info(
+                        f"Synced {len(tags)} tag(s) for account "
+                        f"{account.id} ({account.name})"
+                    )
+                else:
+                    skipped += 1
+                    logger.debug(
+                        f"No tags returned for account {account.id} "
+                        f"({account.name})"
+                    )
+            except OrganizationsAccessError as exc:
+                logger.error(
+                    f"Organizations access error for account {account.id}: {exc}"
+                )
+                failed += 1
+            except Exception as exc:
+                logger.error(
+                    f"Unexpected error syncing tags for account {account.id}: {exc}"
+                )
+                failed += 1
+
+        if synced > 0:
+            try:
+                self.data_manager.save_accounts(collection)
+            except AccountDataError as exc:
+                raise AccountManagerError(
+                    f"Failed to save synced tag data: {exc}"
+                ) from exc
+
+        logger.info(
+            f"Tag sync complete: {synced} synced, {skipped} skipped, "
+            f"{failed} failed"
+        )
+        return {'synced': synced, 'skipped': skipped, 'failed': failed}
     
     def is_authenticated(self) -> bool:
         """Check if SSO is authenticated"""
