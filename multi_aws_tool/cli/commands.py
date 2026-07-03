@@ -2401,5 +2401,103 @@ def completion(shell):
         click.echo('_MULTI_AWS_COMPLETE=fish_source multi-aws > ~/.config/fish/completions/multi-aws.fish')
 
 
+@cli.command()
+@click.pass_context
+def tui(ctx):
+    """Launch the interactive Terminal UI (TUI).
+
+    Provides an interactive interface for browsing accounts, managing
+    teams, viewing templates, and running commands via a guided workflow.
+    Any command execution requested inside the TUI is carried out after
+    the TUI exits, using the same engine as the 'run' command.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from ..tui.app import TUIApp
+
+    try:
+        account_manager = get_account_manager(ctx)
+    except Exception as e:
+        click.echo(f"❌ Failed to initialise account manager: {e}", err=True)
+        return
+
+    config_manager = ctx.obj.config_manager if ctx.obj else None
+
+    app = TUIApp(account_manager, config_manager)
+    try:
+        result = app.run()
+    except Exception as e:
+        click.echo(f"❌ TUI error: {e}", err=True)
+        logger.exception("Unexpected error in TUI")
+        return
+
+    # If the user confirmed a 'run' action inside the TUI, execute it now.
+    if result and result.get('action') == 'run':
+        account_ids = result['accounts']
+        command_str = result['command']
+        parallel    = result['parallel']
+        region      = result['region'] or None
+        dry_run     = result['dry_run']
+        role_filter = result['role'] or None
+
+        click.echo(f"\n🚀 Executing: aws {command_str}")
+        click.echo(f"   Accounts : {len(account_ids)}")
+        click.echo(f"   Mode     : {'parallel' if parallel else 'sequential'}")
+        if region:
+            click.echo(f"   Region   : {region}")
+        if role_filter:
+            click.echo(f"   Role     : {role_filter}")
+        if dry_run:
+            click.echo("   Dry-run  : YES")
+
+        # Resolve Account objects
+        try:
+            collection = account_manager.data_manager.load_accounts()
+        except Exception as e:
+            click.echo(f"❌ Failed to load account data: {e}", err=True)
+            return
+
+        valid_accounts = []
+        for aid in account_ids:
+            acc = collection.get_account(aid)
+            if acc is None:
+                click.echo(f"⚠️  Account {aid} not found, skipping")
+                continue
+            if not acc.profile_name:
+                click.echo(f"⚠️  No profile for {acc.name} ({aid}), skipping")
+                continue
+            valid_accounts.append(acc)
+
+        if not valid_accounts:
+            click.echo("❌ No valid accounts with profiles to run against.")
+            return
+
+        if dry_run:
+            click.echo("\n📋 Dry-run – the following would be executed:")
+            for acc in valid_accounts:
+                r = region or 'default'
+                click.echo(f"  aws --profile {acc.profile_name} --region {r} {command_str}")
+            return
+
+        # Delegate to the 'run' sub-command's core logic by re-invoking
+        # it via ctx.invoke so all existing options / security checks apply.
+        accounts_arg = ','.join(account_ids)
+        cmd_tuple    = tuple(command_str.split())
+        ctx.invoke(
+            run,
+            command=cmd_tuple,
+            accounts=accounts_arg,
+            team=None,
+            tags=None,
+            output_dir=None,
+            region=region,
+            all_regions=False,
+            parallel=parallel,
+            timeout=300,
+            dry_run=False,
+            save=False,
+            verbose=False,
+        )
+
+
 if __name__ == '__main__':
     cli()
