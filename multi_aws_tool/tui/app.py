@@ -102,6 +102,8 @@ class TUIApp:
             elif screen == 'templates': screen = self._screen_templates()
             elif screen == 'results':   screen = self._screen_results()
             elif screen == 'run':       screen = self._screen_run_workflow()
+            elif screen == 'config':    screen = self._screen_config()
+            elif screen == 'discovery': screen = self._screen_discovery()
             else:                       break
 
     def _init_colors(self) -> None:
@@ -417,6 +419,8 @@ class TUIApp:
             ('P', 'Templates / Presets',   'templates'),
             ('V', 'Browse Run Results',    'results'),
             ('R', 'Run Command Workflow',  'run'),
+            ('D', 'Discovery & Profiles',  'discovery'),
+            ('C', 'Edit Configuration',    'config'),
             ('Q', 'Quit',                  None),
         ]
         selected = 0
@@ -1031,7 +1035,7 @@ class TUIApp:
                 selected = min(selected, total - 1) if total else 0
                 self._draw_list_rows(rows, selected, start, visible, scroll)
 
-            self._draw_footer(' ↑↓ Navigate   Enter Details   R Refresh   Q Back ')
+            self._draw_footer(' ↑↓ Navigate   Enter Summary   O Outputs   R Refresh   Q Back ')
             self.stdscr.refresh()
 
             key = self.stdscr.getch()
@@ -1041,6 +1045,8 @@ class TUIApp:
                 continue
             elif total and _is_enter(key):
                 self._show_result_detail(records[selected])
+            elif total and key in (ord('o'), ord('O')):
+                self._screen_result_outputs(records[selected])
             else:
                 selected, scroll = self._nav(key, selected, scroll, total, visible)
 
@@ -1080,6 +1086,79 @@ class TUIApp:
 
         self._detail_page('Execution Result Detail', lines)
 
+    def _screen_result_outputs(self, record: Dict[str, Any]) -> None:
+        """Browse per-account outputs for one execution summary."""
+        summary = record['summary']
+        results = list(summary.results)
+        total = len(results)
+        if not total:
+            self._flash('No per-account results in this summary.', is_error=True)
+            return
+
+        selected = 0
+        scroll = 0
+
+        while True:
+            h, w = self.stdscr.getmaxyx()
+            self.stdscr.clear()
+            start = self._draw_header(
+                f'Outputs: {_truncate(record["command"], 40)}',
+                f'{total} account result(s)',
+            )
+            visible = h - start - 1
+
+            rows = []
+            for res in results:
+                status = str(getattr(res, 'status', 'UNKNOWN')).upper()
+                marker = '✓' if 'SUCCESS' in status else ('⏰' if 'TIMEOUT' in status else '✗')
+                name = getattr(res, 'account_name', None) or getattr(res, 'account_id', 'unknown')
+                account_id = getattr(res, 'account_id', 'unknown')
+                has_out = bool((getattr(res, 'output', '') or '').strip())
+                has_err = bool((getattr(res, 'error', '') or '').strip())
+                flags = ('[out]' if has_out else '     ') + (' [err]' if has_err else '      ')
+                rows.append(f'{marker} {name:<28} ({account_id})  {status:<10}  {flags}')
+
+            selected = min(selected, total - 1) if total else 0
+            self._draw_list_rows(rows, selected, start, visible, scroll)
+            self._draw_footer(' ↑↓ Navigate   Enter View Output   E View Error   Q Back ')
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, ord('q'), ord('Q')):
+                return
+            elif total and _is_enter(key):
+                res = results[selected]
+                output = (getattr(res, 'output', '') or '').strip()
+                name = getattr(res, 'account_name', None) or getattr(res, 'account_id', 'unknown')
+                if output:
+                    output_lines = self._format_output_lines(output)
+                    self._detail_page(f'Output: {name}', output_lines)
+                else:
+                    self._flash('No output for this account.')
+            elif total and key in (ord('e'), ord('E')):
+                res = results[selected]
+                error = (getattr(res, 'error', '') or '').strip()
+                name = getattr(res, 'account_name', None) or getattr(res, 'account_id', 'unknown')
+                if error:
+                    error_lines = error.splitlines()
+                    self._detail_page(f'Error: {name}', error_lines)
+                else:
+                    self._flash('No error output for this account.')
+            else:
+                selected, scroll = self._nav(key, selected, scroll, total, visible)
+
+    @staticmethod
+    def _format_output_lines(output: str) -> List[str]:
+        """Try to pretty-print JSON output; fall back to raw lines."""
+        import json as _json
+        stripped = output.strip()
+        try:
+            parsed = _json.loads(stripped)
+            pretty = _json.dumps(parsed, indent=2)
+            return pretty.splitlines()
+        except Exception:
+            return stripped.splitlines()
+
     def _show_template_detail(self, tmpl: Any) -> None:
         lines = [
             f'Name:     {tmpl.name}',
@@ -1114,7 +1193,344 @@ class TUIApp:
         """Pre-fill the run workflow with the template's settings."""
         return self._screen_run_workflow(template=tmpl)
 
-    # ─── Screen: Run workflow ─────────────────────────────────────────────
+    # ─── Screen: Config editor ────────────────────────────────────────────
+
+    def _screen_config(self) -> Optional[str]:
+        """Interactive configuration editor."""
+        if self.config_manager is None:
+            self._flash('No configuration manager available.', is_error=True)
+            return 'main'
+
+        # Sections and their editable keys with descriptions
+        _CONFIG_FIELDS: List[Tuple[str, str, str]] = [
+            ('general',   'prefix',                     'Profile prefix'),
+            ('general',   'sso-session',                'SSO session name'),
+            ('general',   'account-file',               'Account file path'),
+            ('general',   'region',                     'Default region'),
+            ('output',    'pattern',                    'Output filename pattern'),
+            ('output',    'format',                     'Output format (json/yaml/txt/csv)'),
+            ('output',    'path',                       'Output directory'),
+            ('execution', 'mode',                       'Execution mode (parallel/sequential)'),
+            ('execution', 'stop-on-errors',             'Stop after N errors (0=never)'),
+            ('security',  'allow-destructive-commands', 'Allow destructive commands (true/false)'),
+            ('logging',   'level',                      'Log level (DEBUG/INFO/WARNING/ERROR)'),
+            ('logging',   'file',                       'Log file path'),
+            ('logging',   'console',                    'Console logging (true/false)'),
+            ('logging',   'max-size',                   'Max log size MB'),
+            ('logging',   'backup-count',               'Log backup count'),
+        ]
+
+        selected = 0
+        scroll = 0
+        dirty = False
+
+        while True:
+            total = len(_CONFIG_FIELDS)
+            h, w = self.stdscr.getmaxyx()
+            self.stdscr.clear()
+            start = self._draw_header('Configuration', 'Edit settings  ·  S Save  ·  Q Back')
+            visible = h - start - 1
+
+            rows = []
+            for section, key, label in _CONFIG_FIELDS:
+                try:
+                    val = self.config_manager.get(section, key, '')
+                except Exception:
+                    val = ''
+                rows.append(f'{label:<38}  {_truncate(val, max(10, w - 44))}')
+
+            selected = min(selected, total - 1) if total else 0
+            self._draw_list_rows(rows, selected, start, visible, scroll)
+
+            footer = ' ↑↓ Navigate   Enter Edit   S Save   Q Back '
+            if dirty:
+                footer = ' ↑↓ Navigate   Enter Edit   S Save*   Q Back (unsaved changes) '
+            self._draw_footer(footer)
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, ord('q'), ord('Q')):
+                if dirty and not self._confirm('Discard unsaved changes?'):
+                    continue
+                return 'main'
+            elif key in (ord('s'), ord('S')):
+                try:
+                    self.config_manager.save_config()
+                    dirty = False
+                    self._flash('Configuration saved.')
+                except Exception as exc:
+                    self._flash(f'Save failed: {exc}', is_error=True)
+            elif _is_enter(key) and total:
+                section, cfg_key, label = _CONFIG_FIELDS[selected]
+                try:
+                    current = self.config_manager.get(section, cfg_key, '')
+                except Exception:
+                    current = ''
+                new_val = self._prompt(label, default=current)
+                if new_val is not None and new_val != current:
+                    self.config_manager.set(section, cfg_key, new_val.strip())
+                    dirty = True
+            else:
+                selected, scroll = self._nav(key, selected, scroll, total, visible)
+
+    # ─── Screen: Discovery & Profiles ─────────────────────────────────────
+
+    def _screen_discovery(self) -> Optional[str]:
+        """Account discovery, role fetching, and profile creation."""
+        options: List[Tuple[str, str]] = [
+            ('D', 'Discover accounts (SSO)'),
+            ('R', 'Fetch roles for accounts'),
+            ('P', 'Create AWS CLI profiles'),
+            ('', '──────────────────────────'),
+            ('Q', 'Back'),
+        ]
+        selected = 0
+
+        while True:
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            start = self._draw_header('Discovery & Profiles', 'Manage account discovery and AWS CLI profiles')
+            visible = h - start - 1
+
+            for i, (shortcut, label) in enumerate(options):
+                row = start + i
+                if row >= h - 2:
+                    break
+                if label.startswith('──'):
+                    self.stdscr.attron(curses.color_pair(_CP_DIM))
+                    self.stdscr.addstr(row, 2, _truncate(label, w - 3))
+                    self.stdscr.attroff(curses.color_pair(_CP_DIM))
+                    continue
+                if i == selected:
+                    attr = curses.color_pair(_CP_SELECTED) | curses.A_BOLD
+                    line = f' ▶ [{shortcut}] {label}'
+                else:
+                    attr = curses.color_pair(_CP_NORMAL)
+                    line = f'   [{shortcut}] {label}'
+                self.stdscr.attron(attr)
+                self.stdscr.addstr(row, 0, _truncate(line, w - 1).ljust(w - 1))
+                self.stdscr.attroff(attr)
+
+            self._draw_footer(' ↑↓ Navigate   Enter/letter Select   Q Back ')
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+
+            if key in (_ESC, ord('q'), ord('Q')):
+                return 'main'
+            elif key == curses.KEY_UP:
+                selected = max(0, selected - 1)
+                if options[selected][0] == '':
+                    selected = max(0, selected - 1)
+            elif key == curses.KEY_DOWN:
+                selected = min(len(options) - 1, selected + 1)
+                if options[selected][0] == '':
+                    selected = min(len(options) - 1, selected + 1)
+            elif _is_enter(key) or key == ord(' '):
+                shortcut, _ = options[selected]
+                if shortcut == 'D':
+                    self._do_discover_accounts()
+                elif shortcut == 'R':
+                    self._do_fetch_roles()
+                elif shortcut == 'P':
+                    self._do_create_profiles()
+                elif shortcut == 'Q':
+                    return 'main'
+            else:
+                for shortcut, _ in options:
+                    if shortcut and key in (ord(shortcut.lower()), ord(shortcut.upper())):
+                        if shortcut == 'D':
+                            self._do_discover_accounts()
+                        elif shortcut == 'R':
+                            self._do_fetch_roles()
+                        elif shortcut == 'P':
+                            self._do_create_profiles()
+                        elif shortcut == 'Q':
+                            return 'main'
+                        break
+
+    def _do_discover_accounts(self) -> None:
+        """Run account discovery via SSO and reload collection."""
+        self.stdscr.clear()
+        h, w = self.stdscr.getmaxyx()
+        self._draw_header('Discovering Accounts…')
+        self.stdscr.attron(curses.color_pair(_CP_INFO))
+        self.stdscr.addstr(3, 2, 'Connecting to AWS SSO to discover accounts…')
+        self.stdscr.attroff(curses.color_pair(_CP_INFO))
+        self.stdscr.refresh()
+
+        try:
+            collection = self.account_manager.discover_accounts(force_refresh=True)
+            self._reload_collection()
+            count = len(collection.accounts) if collection else 0
+            self._flash(f'Discovery complete: {count} account(s) found.')
+        except Exception as exc:
+            self._flash(f'Discovery failed: {_truncate(str(exc), 80)}', is_error=True)
+
+    def _do_fetch_roles(self) -> None:
+        """Prompt for accounts and fetch their roles."""
+        collection = self._get_collection()
+        accounts = list(collection.accounts) if collection else []
+        if not accounts:
+            self._flash('No accounts loaded. Run account discovery first.', is_error=True)
+            return
+
+        # Multi-select accounts
+        selected_ids = self._pick_accounts_multiselect('Fetch Roles', accounts)
+        if not selected_ids:
+            return
+
+        self.stdscr.clear()
+        h, w = self.stdscr.getmaxyx()
+        self._draw_header('Fetching Roles…')
+        self.stdscr.attron(curses.color_pair(_CP_INFO))
+        self.stdscr.addstr(3, 2, f'Fetching roles for {len(selected_ids)} account(s)…')
+        self.stdscr.attroff(curses.color_pair(_CP_INFO))
+        self.stdscr.refresh()
+
+        try:
+            results = self.account_manager.update_roles_for_accounts(
+                selected_ids, force_refresh=True
+            )
+            ok = sum(1 for v in results.values() if v)
+            fail = len(results) - ok
+            self._reload_collection()
+            msg = f'Roles fetched: {ok} ok'
+            if fail:
+                msg += f', {fail} failed'
+            self._flash(msg, is_error=(fail > 0 and ok == 0))
+        except Exception as exc:
+            self._flash(f'Role fetch failed: {_truncate(str(exc), 80)}', is_error=True)
+
+    def _do_create_profiles(self) -> None:
+        """Prompt for accounts + role name, then create AWS CLI profiles."""
+        collection = self._get_collection()
+        accounts = list(collection.accounts) if collection else []
+        if not accounts:
+            self._flash('No accounts loaded. Run account discovery first.', is_error=True)
+            return
+
+        # Multi-select accounts
+        selected_ids = self._pick_accounts_multiselect('Create Profiles', accounts)
+        if not selected_ids:
+            return
+
+        # Get role name
+        role_name = self._prompt('Role name for profiles (e.g. PowerUserAccess)')
+        if not role_name or not role_name.strip():
+            return
+        role_name = role_name.strip()
+
+        # Get region override
+        default_region = 'us-east-1'
+        if self.config_manager:
+            try:
+                default_region = self.config_manager.get('general', 'region', 'us-east-1')
+            except Exception:
+                pass
+        region_input = self._prompt('AWS region override (blank for default)', default=default_region)
+        region = (region_input or '').strip() or default_region
+
+        # Get prefix
+        prefix = 'multi-aws'
+        if self.config_manager:
+            try:
+                prefix = self.config_manager.get('general', 'prefix', 'multi-aws')
+            except Exception:
+                pass
+
+        # Build profiles
+        import os as _os
+        aws_config_path = _os.path.expanduser('~/.aws/config')
+        lines: List[str] = []
+        created = 0
+        skipped = 0
+
+        selected_accounts = [a for a in accounts if a.id in set(selected_ids)]
+        for acc in selected_accounts:
+            role_found = any(r.name == role_name for r in acc.roles)
+            if not role_found and acc.roles:
+                skipped += 1
+                continue
+            san_name = acc.name.replace(' ', '-').replace('_', '-').replace('.', '-')
+            san_name = ''.join(c for c in san_name if c.isalnum() or c == '-')
+            san_name = '-'.join(filter(None, san_name.split('-')))
+            profile_name = f'{prefix}-{san_name}-{role_name}'
+            lines += [
+                f'[profile {profile_name}]',
+                f'sso_session = {self.account_manager.sso_client.sso_session_name}',
+                f'sso_account_id = {acc.id}',
+                f'sso_role_name = {role_name}',
+                f'region = {region}',
+                '',
+            ]
+            # Store profile name on account
+            acc.set_profile_name(profile_name)
+            created += 1
+
+        if not lines:
+            self._flash('No profiles created. Check role name and account roles.', is_error=True)
+            return
+
+        if self._confirm(f'Append {created} profile(s) to {aws_config_path}?'):
+            try:
+                _os.makedirs(_os.path.dirname(aws_config_path), exist_ok=True)
+                with open(aws_config_path, 'a') as fh:
+                    fh.write('\n' + '\n'.join(lines))
+                self._save_collection()
+                self._reload_collection()
+                msg = f'{created} profile(s) appended to ~/.aws/config'
+                if skipped:
+                    msg += f'  ({skipped} skipped – role not found)'
+                self._flash(msg)
+            except Exception as exc:
+                self._flash(f'Failed to write profiles: {_truncate(str(exc), 80)}', is_error=True)
+
+    def _pick_accounts_multiselect(
+        self, title: str, accounts: List[Any]
+    ) -> Optional[List[str]]:
+        """Show a multi-select account picker; return list of IDs or None."""
+        selected = 0
+        scroll = 0
+        checked: Set[int] = set()
+        total = len(accounts)
+
+        while True:
+            h, w = self.stdscr.getmaxyx()
+            self.stdscr.clear()
+            start = self._draw_header(
+                title,
+                f'{len(checked)} selected  ·  Space toggle  ·  A all  ·  Enter confirm',
+            )
+            visible = h - start - 1
+            rows = [f'{a.id}  {a.name:<30}  [{a.product_team or "—"}]' for a in accounts]
+            selected = min(selected, total - 1) if total else 0
+            self._draw_multiselect_rows(rows, selected, checked, start, visible, scroll)
+            self._draw_footer(' ↑↓ Navigate   Space Toggle   A All   Enter Confirm   Q Cancel ')
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, ord('q'), ord('Q')):
+                return None
+            elif key == ord(' ') and total:
+                if selected in checked:
+                    checked.discard(selected)
+                else:
+                    checked.add(selected)
+            elif key in (ord('a'), ord('A')):
+                if len(checked) == total:
+                    checked.clear()
+                else:
+                    checked = set(range(total))
+            elif _is_enter(key):
+                if not checked:
+                    self._flash('Select at least one account.', is_error=True)
+                    continue
+                return [accounts[i].id for i in sorted(checked)]
+            else:
+                selected, scroll = self._nav(key, selected, scroll, total, visible)
+
+
 
     def _screen_run_workflow(self, template: Any = None) -> Optional[str]:
         """
@@ -1163,7 +1579,12 @@ class TUIApp:
     def _step_select_accounts(
         self, preselected_team: str = ''
     ) -> Optional[List[str]]:
-        """Step 1: multi-select accounts; return list of IDs or None to cancel."""
+        """Step 1: multi-select accounts; return list of IDs or None to cancel.
+
+        Supports two modes:
+          • Account mode  – individual account multi-select with filter support
+          • Team mode     – pick whole teams at once (B key to switch)
+        """
         collection = self._get_collection()
         accounts   = list(collection.accounts) if collection else []
 
@@ -1172,6 +1593,7 @@ class TUIApp:
         checked: Set[int] = set()
         filt      = ''
         filtering = False
+        team_mode = False  # False = account mode, True = team mode
 
         # Pre-check accounts from the template's team
         if preselected_team:
@@ -1179,92 +1601,201 @@ class TUIApp:
                 if (a.product_team or '') == preselected_team:
                     checked.add(i)
 
+        # ── team mode state ───────────────────────────────────────────────
+        team_selected  = 0
+        team_scroll    = 0
+        team_checked: Set[str] = set()
+
+        def _build_teams() -> List[str]:
+            tm: Dict[str, int] = {}
+            for a in accounts:
+                t = a.product_team or ''
+                tm[t] = tm.get(t, 0) + 1
+            names = sorted(k for k in tm if k)
+            if '' in tm:
+                names.append('(unassigned)')
+            return names
+
         while True:
-            visible_accounts = accounts
-            if filt:
-                fl = filt.lower()
-                visible_accounts = [
-                    a for a in accounts
-                    if fl in a.name.lower() or fl in a.id
-                    or fl in (a.product_team or '').lower()
-                ]
-            # Re-map checked indices when filtered
-            if filt:
-                filtered_ids = {a.id for a in visible_accounts}
-                filtered_checked: Set[int] = {
-                    i for i, a in enumerate(visible_accounts) if a.id in {accounts[j].id for j in checked}
-                }
-                display_checked = filtered_checked
-            else:
-                display_checked = checked
+            if team_mode:
+                # ─── Team selection mode ──────────────────────────────────
+                team_names = _build_teams()
+                t_total = len(team_names)
 
-            total = len(visible_accounts)
-            h, w  = self.stdscr.getmaxyx()
-
-            self.stdscr.clear()
-            start = self._draw_header(
-                'Select Accounts  (Step 1 of 4)',
-                f'{len(checked)} selected  ·  {total} shown'
-                + (f'  ·  filter: "{filt}"' if filt else ''),
-            )
-            visible_rows = h - start - 1
-
-            rows = [f'{a.id}  {a.name:<30}  [{a.product_team or "—"}]' for a in visible_accounts]
-            if total:
-                selected = min(selected, total - 1)
-            self._draw_multiselect_rows(rows, selected, display_checked, start, visible_rows, scroll)
-
-            if filtering:
-                self._draw_footer(f' Filter: {filt}_  (Enter confirm  Esc cancel) ')
-            else:
-                self._draw_footer(
-                    ' Space Toggle   A All   T By team   / Filter   Enter Next   Q Cancel '
+                h, w = self.stdscr.getmaxyx()
+                self.stdscr.clear()
+                start = self._draw_header(
+                    'Select Teams  (Step 1 of 4)',
+                    f'{len(team_checked)} team(s) selected  ·  B switch to account mode',
                 )
-            self.stdscr.refresh()
+                visible_rows = h - start - 1
 
-            key = self.stdscr.getch()
+                # Count accounts per team for display
+                team_counts: Dict[str, int] = {}
+                for a in accounts:
+                    t = a.product_team or ''
+                    team_counts[t] = team_counts.get(t, 0) + 1
 
-            if filtering:
-                if key in (_ESC, _CTRL_C):
-                    filtering = False
-                    filt = ''
-                elif _is_enter(key):
-                    filtering = False
-                elif key in (curses.KEY_BACKSPACE, 127, 8):
-                    filt = filt[:-1]
-                elif 32 <= key <= 126:
-                    filt += chr(key)
-                continue
+                t_rows = []
+                for tn in team_names:
+                    key_name = '' if tn == '(unassigned)' else tn
+                    cnt = team_counts.get(key_name, 0)
+                    t_rows.append(f'{tn:<35}  {cnt} account(s)')
 
-            if key in (_ESC, ord('q'), ord('Q')):
-                return None
-            elif key == ord('/'):
-                filtering = True
-                filt = ''
-            elif key == ord(' ') and total:
-                real_idx = accounts.index(visible_accounts[selected]) if filt else selected
-                if real_idx in checked:
-                    checked.discard(real_idx)
-                else:
-                    checked.add(real_idx)
-            elif key in (ord('a'), ord('A')):
-                if len(checked) == len(accounts):
+                t_checked_idx: Set[int] = {
+                    i for i, tn in enumerate(team_names)
+                    if ('' if tn == '(unassigned)' else tn) in team_checked
+                }
+                team_selected = min(team_selected, t_total - 1) if t_total else 0
+                self._draw_multiselect_rows(t_rows, team_selected, t_checked_idx, start, visible_rows, team_scroll)
+                self._draw_footer(
+                    ' Space Toggle   A All   B Account mode   Enter Next   Q Cancel '
+                )
+                self.stdscr.refresh()
+
+                key = self.stdscr.getch()
+                if key in (_ESC, ord('q'), ord('Q')):
+                    return None
+                elif key in (ord('b'), ord('B')):
+                    # Switch back to account mode, translating team selection → checked accounts
                     checked.clear()
-                else:
-                    checked = set(range(len(accounts)))
-            elif key in (ord('t'), ord('T')):
-                team_name = self._prompt('Filter by team name')
-                if team_name and team_name.strip():
                     for i, a in enumerate(accounts):
-                        if (a.product_team or '').lower() == team_name.strip().lower():
+                        t = a.product_team or ''
+                        if t in team_checked or (not t and '' in team_checked):
                             checked.add(i)
-            elif _is_enter(key):
-                if not checked:
-                    self._flash('Select at least one account.', is_error=True)
-                    continue
-                return [accounts[i].id for i in sorted(checked)]
+                    team_mode = False
+                    selected = 0
+                    scroll = 0
+                elif key == ord(' ') and t_total:
+                    tn = team_names[team_selected]
+                    key_name = '' if tn == '(unassigned)' else tn
+                    if key_name in team_checked:
+                        team_checked.discard(key_name)
+                    else:
+                        team_checked.add(key_name)
+                elif key in (ord('a'), ord('A')):
+                    if len(team_checked) == t_total:
+                        team_checked.clear()
+                    else:
+                        team_checked = {
+                            ('' if tn == '(unassigned)' else tn)
+                            for tn in team_names
+                        }
+                elif _is_enter(key):
+                    if not team_checked:
+                        self._flash('Select at least one team.', is_error=True)
+                        continue
+                    # Expand teams → account IDs
+                    result_ids = [
+                        a.id for a in accounts
+                        if (a.product_team or '') in team_checked
+                    ]
+                    if not result_ids:
+                        self._flash('No accounts in selected team(s).', is_error=True)
+                        continue
+                    return result_ids
+                else:
+                    team_selected, team_scroll = self._nav(
+                        key, team_selected, team_scroll, t_total, visible_rows
+                    )
+
             else:
-                selected, scroll = self._nav(key, selected, scroll, total, visible_rows)
+                # ─── Account selection mode ───────────────────────────────
+                visible_accounts = accounts
+                if filt:
+                    fl = filt.lower()
+                    visible_accounts = [
+                        a for a in accounts
+                        if fl in a.name.lower() or fl in a.id
+                        or fl in (a.product_team or '').lower()
+                    ]
+                # Re-map checked indices when filtered
+                if filt:
+                    filtered_checked: Set[int] = {
+                        i for i, a in enumerate(visible_accounts)
+                        if a.id in {accounts[j].id for j in checked}
+                    }
+                    display_checked = filtered_checked
+                else:
+                    display_checked = checked
+
+                total = len(visible_accounts)
+                h, w  = self.stdscr.getmaxyx()
+
+                self.stdscr.clear()
+                start = self._draw_header(
+                    'Select Accounts  (Step 1 of 4)',
+                    f'{len(checked)} selected  ·  {total} shown'
+                    + (f'  ·  filter: "{filt}"' if filt else ''),
+                )
+                visible_rows = h - start - 1
+
+                rows = [f'{a.id}  {a.name:<30}  [{a.product_team or "—"}]' for a in visible_accounts]
+                if total:
+                    selected = min(selected, total - 1)
+                self._draw_multiselect_rows(rows, selected, display_checked, start, visible_rows, scroll)
+
+                if filtering:
+                    self._draw_footer(f' Filter: {filt}_  (Enter confirm  Esc cancel) ')
+                else:
+                    self._draw_footer(
+                        ' Space Toggle   A All   T Add team   B Team mode   / Filter   Enter Next   Q Cancel '
+                    )
+                self.stdscr.refresh()
+
+                key = self.stdscr.getch()
+
+                if filtering:
+                    if key in (_ESC, _CTRL_C):
+                        filtering = False
+                        filt = ''
+                    elif _is_enter(key):
+                        filtering = False
+                    elif key in (curses.KEY_BACKSPACE, 127, 8):
+                        filt = filt[:-1]
+                    elif 32 <= key <= 126:
+                        filt += chr(key)
+                    continue
+
+                if key in (_ESC, ord('q'), ord('Q')):
+                    return None
+                elif key == ord('/'):
+                    filtering = True
+                    filt = ''
+                elif key in (ord('b'), ord('B')):
+                    # Switch to team mode; sync current checked → team_checked
+                    team_checked.clear()
+                    for j in checked:
+                        t = accounts[j].product_team or ''
+                        team_checked.add(t)
+                    team_mode = True
+                    team_selected = 0
+                    team_scroll = 0
+                elif key == ord(' ') and total:
+                    real_idx = accounts.index(visible_accounts[selected]) if filt else selected
+                    if real_idx in checked:
+                        checked.discard(real_idx)
+                    else:
+                        checked.add(real_idx)
+                elif key in (ord('a'), ord('A')):
+                    if len(checked) == len(accounts):
+                        checked.clear()
+                    else:
+                        checked = set(range(len(accounts)))
+                elif key in (ord('t'), ord('T')):
+                    team_name = self._prompt('Add accounts by team name')
+                    if team_name and team_name.strip():
+                        for i, a in enumerate(accounts):
+                            if (a.product_team or '').lower() == team_name.strip().lower():
+                                checked.add(i)
+                elif _is_enter(key):
+                    if not checked:
+                        self._flash('Select at least one account.', is_error=True)
+                        continue
+                    return [accounts[i].id for i in sorted(checked)]
+                else:
+                    selected, scroll = self._nav(key, selected, scroll, total, visible_rows)
+
 
     def _step_enter_command(self, default: str = '') -> Optional[str]:
         """Step 2: enter an AWS CLI command."""
