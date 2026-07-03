@@ -276,6 +276,108 @@ class TestTuiCommand:
         assert '❌' in result.output
 
 
+class TestAccountDetailsActions:
+    def test_show_account_detail_profile_shortcut_calls_profile_helper(self):
+        account = _make_account(
+            "123456789012", "Acme", roles=[Role("PowerUserAccess", "arn:aws:iam::123456789012:role/PowerUserAccess")]
+        )
+        app = TUIApp(_mock_account_manager(_make_collection(account)), None)
+        app.stdscr = MagicMock()
+        app.stdscr.getmaxyx.return_value = (20, 80)
+        app.stdscr.getch.side_effect = [ord('p'), ord('q')]
+
+        with patch.object(app, "_draw_header", return_value=1), \
+             patch.object(app, "_draw_footer"), \
+             patch.object(app, "_account_create_profile") as create_profile, \
+             patch.object(app, "_account_edit_details") as edit_details, \
+             patch("multi_aws_tool.tui.app.curses.color_pair", return_value=0):
+            app._show_account_detail(account)
+
+        create_profile.assert_called_once_with(account)
+        edit_details.assert_not_called()
+
+    def test_show_account_detail_edit_shortcut_calls_edit_helper(self):
+        account = _make_account("123456789012", "Acme")
+        app = TUIApp(_mock_account_manager(_make_collection(account)), None)
+        app.stdscr = MagicMock()
+        app.stdscr.getmaxyx.return_value = (20, 80)
+        app.stdscr.getch.side_effect = [ord('e'), ord('q')]
+
+        with patch.object(app, "_draw_header", return_value=1), \
+             patch.object(app, "_draw_footer"), \
+             patch.object(app, "_account_create_profile") as create_profile, \
+             patch.object(app, "_account_edit_details") as edit_details, \
+             patch("multi_aws_tool.tui.app.curses.color_pair", return_value=0):
+            app._show_account_detail(account)
+
+        edit_details.assert_called_once_with(account)
+        create_profile.assert_not_called()
+
+    def test_account_set_tag_updates_collection_and_saves(self):
+        account = _make_account("123456789012", "Acme")
+        collection = _make_collection(account)
+        manager = _mock_account_manager(collection)
+        app = TUIApp(manager, None)
+        app._collection = collection
+
+        with patch.object(app, "_prompt", side_effect=["owner", "platform"]), \
+             patch.object(app, "_flash"):
+            app._account_set_tag(account)
+
+        assert collection.get_account("123456789012").tags == {"owner": "platform"}
+        manager.data_manager.save_accounts.assert_called_once_with(collection)
+
+    def test_account_remove_tag_removes_selected_tag_and_saves(self):
+        account = _make_account("123456789012", "Acme")
+        account.tags = {"owner": "platform", "env": "prod"}
+        collection = _make_collection(account)
+        manager = _mock_account_manager(collection)
+        app = TUIApp(manager, None)
+        app._collection = collection
+
+        with patch.object(app, "_pick_from_list", return_value="owner = platform"), \
+             patch.object(app, "_flash"):
+            app._account_remove_tag(account)
+
+        assert collection.get_account("123456789012").tags == {"env": "prod"}
+        manager.data_manager.save_accounts.assert_called_once_with(collection)
+
+    def test_create_profiles_for_account_ids_writes_profile_and_updates_account(self, tmp_path):
+        account = _make_account(
+            "123456789012", "Acme", roles=[Role("PowerUserAccess", "arn:aws:iam::123456789012:role/PowerUserAccess")]
+        )
+        collection = _make_collection(account)
+        manager = _mock_account_manager(collection)
+        config_manager = MagicMock()
+
+        def cfg_get(section, key, default=None):
+            values = {
+                ("general", "region"): "eu-west-1",
+                ("general", "prefix"): "multi-aws",
+            }
+            return values.get((section, key), default)
+
+        config_manager.get.side_effect = cfg_get
+        app = TUIApp(manager, config_manager)
+        app._collection = collection
+
+        aws_config_path = tmp_path / "aws-config"
+
+        with patch.object(app, "_prompt", return_value=""), \
+             patch.object(app, "_confirm", return_value=True), \
+             patch.object(app, "_flash"), \
+             patch("os.path.expanduser", side_effect=lambda value: str(aws_config_path) if value == "~/.aws/config" else value):
+            app._create_profiles_for_account_ids(["123456789012"], "PowerUserAccess")
+
+        content = aws_config_path.read_text(encoding="utf-8")
+        assert "[profile multi-aws-Acme-PowerUserAccess]" in content
+        assert "sso_account_id = 123456789012" in content
+        assert "sso_role_name = PowerUserAccess" in content
+        assert "region = eu-west-1" in content
+        assert collection.get_account("123456789012").profile_name == "multi-aws-Acme-PowerUserAccess"
+        manager.data_manager.save_accounts.assert_called()
+
+
 class TestResultsHelpers:
     def test_ratio_bar_handles_zero_total(self):
         assert TUIApp._ratio_bar(0, 0, width=5) == "░░░░░"

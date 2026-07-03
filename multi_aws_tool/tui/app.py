@@ -45,6 +45,14 @@ def _truncate(text: str, max_len: int) -> str:
     return text[:max_len - 1] + '…'
 
 
+def _sanitize_profile_name_component(name: str) -> str:
+    """Sanitize a name component for use in AWS profile names."""
+    sanitized = name.replace(' ', '-').replace('_', '-').replace('.', '-')
+    sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '-')
+    sanitized = '-'.join(filter(None, sanitized.split('-')))
+    return sanitized
+
+
 # ─── TUIApp ───────────────────────────────────────────────────────────────────
 
 class TUIApp:
@@ -348,6 +356,33 @@ class TUIApp:
             else:
                 return
 
+    def _pick_from_list(
+        self, title: str, options: List[str], subtitle: str = 'Select an option'
+    ) -> Optional[str]:
+        """Show a simple single-select list and return the chosen option."""
+        if not options:
+            return None
+
+        selected = 0
+        scroll = 0
+
+        while True:
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            start = self._draw_header(title, subtitle)
+            visible = h - start - 1
+            rows = [_truncate(option, max(10, w - 6)) for option in options]
+            self._draw_list_rows(rows, selected, start, visible, scroll)
+            self._draw_footer(' ↑↓ Navigate   Enter Select   Q Back ')
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, _CTRL_C, ord('q'), ord('Q')):
+                return None
+            if _is_enter(key):
+                return options[selected]
+            selected, scroll = self._nav(key, selected, scroll, len(options), visible)
+
     @staticmethod
     def _ratio_bar(value: int, total: int, width: int = 20, fill: str = '█') -> str:
         """Return a fixed-width bar visualising value/total."""
@@ -572,32 +607,66 @@ class TUIApp:
 
     def _show_account_detail(self, account: Any) -> None:
         """Show a detail page for a single account."""
-        status = account.status.value if hasattr(account.status, 'value') else str(account.status)
-        lines = [
-            f'ID:      {account.id}',
-            f'Name:    {account.name}',
-            f'Status:  {status}',
-            f'Team:    {account.product_team or "(none)"}',
-            f'Profile: {account.profile_name or "(none)"}',
-            '',
-            f'Roles ({len(account.roles)}):',
-        ]
-        for role in account.roles:
-            lines.append(f'  • {role.name}')
-            if role.arn:
-                lines.append(f'    {role.arn}')
-        if not account.roles:
-            lines.append('  (no roles fetched yet)')
-        lines.append('')
-        lines.append(f'Tags ({len(account.tags)}):')
-        for k, v in sorted(account.tags.items()):
-            lines.append(f'  {k} = {v}')
-        if not account.tags:
-            lines.append('  (no tags)')
-        lines.append('')
-        updated = account.last_updated.isoformat() if hasattr(account.last_updated, 'isoformat') else str(account.last_updated)
-        lines.append(f'Last updated: {updated}')
-        self._detail_page(f'Account: {account.name}', lines)
+        scroll = 0
+
+        while True:
+            collection = self._get_collection()
+            current = collection.get_account(account.id) if collection else account
+            status = current.status.value if hasattr(current.status, 'value') else str(current.status)
+            lines = [
+                f'ID:      {current.id}',
+                f'Name:    {current.name}',
+                f'Status:  {status}',
+                f'Team:    {current.product_team or "(none)"}',
+                f'Profile: {current.profile_name or "(none)"}',
+                '',
+                f'Roles ({len(current.roles)}):',
+            ]
+            for role in current.roles:
+                lines.append(f'  • {role.name}')
+                if role.arn:
+                    lines.append(f'    {role.arn}')
+            if not current.roles:
+                lines.append('  (no roles fetched yet)')
+            lines.append('')
+            lines.append(f'Tags ({len(current.tags)}):')
+            for k, v in sorted(current.tags.items()):
+                lines.append(f'  {k} = {v}')
+            if not current.tags:
+                lines.append('  (no tags)')
+            lines.append('')
+            updated = current.last_updated.isoformat() if hasattr(current.last_updated, 'isoformat') else str(current.last_updated)
+            lines.append(f'Last updated: {updated}')
+
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            start = self._draw_header(f'Account: {current.name}', current.id)
+            visible = h - start - 1
+            for i, line in enumerate(lines[scroll: scroll + visible]):
+                r = start + i
+                self.stdscr.attron(curses.color_pair(_CP_NORMAL))
+                self.stdscr.addstr(r, 2, _truncate(line, w - 3))
+                self.stdscr.attroff(curses.color_pair(_CP_NORMAL))
+            self._draw_footer(
+                ' ↑↓/PgUp/PgDn Scroll   P Create profile   E Edit account   Q Back '
+            )
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, _CTRL_C, ord('q'), ord('Q')):
+                return
+            if key == curses.KEY_UP:
+                scroll = max(0, scroll - 1)
+            elif key == curses.KEY_DOWN:
+                scroll = min(max(0, len(lines) - visible), scroll + 1)
+            elif key == curses.KEY_PPAGE:
+                scroll = max(0, scroll - visible)
+            elif key == curses.KEY_NPAGE:
+                scroll = min(max(0, len(lines) - visible), scroll + visible)
+            elif key in (ord('p'), ord('P')):
+                self._account_create_profile(current)
+            elif key in (ord('e'), ord('E')):
+                self._account_edit_details(current)
 
     def _account_assign_team(self, account: Any) -> None:
         """Prompt to assign (or remove) a team for *account*."""
@@ -622,6 +691,109 @@ class TUIApp:
             self._flash(msg)
         else:
             self._flash('Failed to save changes.', is_error=True)
+
+    def _account_edit_details(self, account: Any) -> None:
+        """Show account detail edit actions."""
+        action = self._pick_from_list(
+            f'Edit Account: {account.name}',
+            ['Edit team', 'Set tag', 'Remove tag'],
+            'Update account metadata',
+        )
+        if action == 'Edit team':
+            self._account_assign_team(account)
+        elif action == 'Set tag':
+            self._account_set_tag(account)
+        elif action == 'Remove tag':
+            self._account_remove_tag(account)
+
+    def _account_set_tag(self, account: Any) -> None:
+        """Prompt to create or update a tag on an account."""
+        collection = self._get_collection()
+        acc = collection.get_account(account.id) if collection else None
+        if acc is None:
+            self._flash('Account not found in data.', is_error=True)
+            return
+
+        key = self._prompt(f'Tag key for {acc.name}')
+        if key is None or not key.strip():
+            return
+        key = key.strip()
+        current_value = acc.tags.get(key, '')
+        value = self._prompt(f'Value for tag "{key}" (blank to remove)', default=current_value)
+        if value is None:
+            return
+
+        from datetime import datetime
+
+        new_value = value.strip()
+        if new_value:
+            acc.tags[key] = new_value
+            acc.last_updated = datetime.now()
+            if self._save_collection():
+                self._flash(f'Tag "{key}" set to "{new_value}"')
+            else:
+                self._flash('Failed to save changes.', is_error=True)
+            return
+
+        if key not in acc.tags:
+            self._flash(f'Tag "{key}" is not set.', is_error=True)
+            return
+
+        acc.tags.pop(key, None)
+        acc.last_updated = datetime.now()
+        if self._save_collection():
+            self._flash(f'Tag "{key}" removed')
+        else:
+            self._flash('Failed to save changes.', is_error=True)
+
+    def _account_remove_tag(self, account: Any) -> None:
+        """Select and remove a tag from an account."""
+        collection = self._get_collection()
+        acc = collection.get_account(account.id) if collection else None
+        if acc is None:
+            self._flash('Account not found in data.', is_error=True)
+            return
+        if not acc.tags:
+            self._flash('No tags to remove.', is_error=True)
+            return
+
+        selected = self._pick_from_list(
+            f'Remove Tag: {acc.name}',
+            [f'{key} = {value}' for key, value in sorted(acc.tags.items())],
+            'Select a tag to remove',
+        )
+        if not selected:
+            return
+
+        tag_key = selected.split(' = ', 1)[0]
+        from datetime import datetime
+
+        acc.tags.pop(tag_key, None)
+        acc.last_updated = datetime.now()
+        if self._save_collection():
+            self._flash(f'Tag "{tag_key}" removed')
+        else:
+            self._flash('Failed to save changes.', is_error=True)
+
+    def _account_create_profile(self, account: Any) -> None:
+        """Create a profile for a single account using one of its roles."""
+        collection = self._get_collection()
+        acc = collection.get_account(account.id) if collection else None
+        if acc is None:
+            self._flash('Account not found in data.', is_error=True)
+            return
+        if not acc.roles:
+            self._flash('No roles available. Fetch roles first.', is_error=True)
+            return
+
+        role_name = self._pick_from_list(
+            f'Create Profile: {acc.name}',
+            [role.name for role in acc.roles],
+            'Select a role for the new profile',
+        )
+        if not role_name:
+            return
+        self._create_profiles_for_account_ids([acc.id], role_name)
 
     # ─── Screen: Teams manager ────────────────────────────────────────────
 
@@ -1415,8 +1587,20 @@ class TUIApp:
         if not selected_ids:
             return
 
-        # Get role name
-        role_name = self._prompt('Role name for profiles (e.g. PowerUserAccess)')
+        self._create_profiles_for_account_ids(selected_ids)
+
+    def _create_profiles_for_account_ids(
+        self, selected_ids: List[str], role_name: Optional[str] = None
+    ) -> None:
+        """Create AWS CLI profiles for the selected account IDs."""
+        collection = self._get_collection()
+        accounts = list(collection.accounts) if collection else []
+        if not accounts:
+            self._flash('No accounts loaded. Run account discovery first.', is_error=True)
+            return
+
+        if role_name is None:
+            role_name = self._prompt('Role name for profiles (e.g. PowerUserAccess)')
         if not role_name or not role_name.strip():
             return
         role_name = role_name.strip()
@@ -1446,15 +1630,14 @@ class TUIApp:
         created = 0
         skipped = 0
 
-        selected_accounts = [a for a in accounts if a.id in set(selected_ids)]
+        selected_id_set = set(selected_ids)
+        selected_accounts = [a for a in accounts if a.id in selected_id_set]
         for acc in selected_accounts:
             role_found = any(r.name == role_name for r in acc.roles)
             if not role_found and acc.roles:
                 skipped += 1
                 continue
-            san_name = acc.name.replace(' ', '-').replace('_', '-').replace('.', '-')
-            san_name = ''.join(c for c in san_name if c.isalnum() or c == '-')
-            san_name = '-'.join(filter(None, san_name.split('-')))
+            san_name = _sanitize_profile_name_component(acc.name)
             profile_name = f'{prefix}-{san_name}-{role_name}'
             lines += [
                 f'[profile {profile_name}]',
