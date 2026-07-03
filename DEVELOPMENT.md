@@ -82,3 +82,49 @@ MultiAWSTool/
 - `python main.py cleanup` - Cleanup operations (placeholder)
 
 All commands show placeholder messages indicating they are not yet implemented.
+
+## Feature Suggestion Tickets
+
+### 1. Account Tag Filtering with AWS Organizations Tag Sync
+- **Summary**: Add account filtering by tags, with the option to automatically pull account tags from AWS Organizations and store them alongside discovered account metadata.
+- **Why**: This would make it much easier to target commands by ownership, environment, cost center, or compliance classification without manually maintaining separate group definitions.
+- **Suggested scope**:
+  - Support `--tag key=value` filters and multiple tag selectors
+  - Refresh tags during account discovery or via a dedicated sync command
+  - Store synced tags in the local account data file
+  - Fall back cleanly when Organizations access is unavailable
+
+### 2. Account Exclude Switch
+- **Summary**: Add a `--exclude-accounts` option that can be used with explicit account lists, teams, or `all`.
+- **Why**: This would provide a safe way to target broad account sets while skipping known exceptions such as break-glass, suspended, or sensitive accounts.
+- **Suggested scope**:
+  - Accept comma-separated account IDs and account file inputs
+  - Apply exclusions after all other account selection filters are resolved
+  - Show excluded accounts clearly in dry-run and execution summaries
+
+### 3. Command Templates / Presets
+- **Summary**: Add named command templates so frequently used AWS CLI commands and common flags can be saved and reused.
+- **Why**: This would reduce repetition, standardize recurring operational workflows, and make it easier for teams to share common run patterns.
+- **Suggested scope**:
+  - Support defining templates in configuration
+  - Allow execution such as `multi-aws run @template-name`
+  - Permit template defaults for regions, output settings, and execution mode
+  - Validate templates with the same security checks as ad hoc commands
+
+### 4. Plugin System
+- **Summary**: Add a plugin architecture so external Python packages or local modules can register new commands, filters, or output handlers.
+- **Why**: This would make the tool more extensible without forcing every team-specific workflow into the core project.
+- **Suggested scope**:
+  - Define a stable plugin interface for loading extensions
+  - Support command registration and optional lifecycle hooks
+  - Isolate plugin failures from core command execution
+  - Document plugin discovery, configuration, and security expectations
+
+### 5. Terminal UI (TUI)
+- **Summary**: Add an interactive terminal UI for browsing accounts, selecting targets, choosing roles, and launching commands.
+- **Why**: This would improve usability for operators who prefer interactive exploration over long command lines, while still using the same underlying execution engine.
+- **Suggested scope**:
+  - Browse and filter discovered accounts interactively
+  - Select accounts, roles, and commands from a guided workflow
+  - Preview the resolved execution plan before running
+  - Reuse existing config, account data, and output handling
