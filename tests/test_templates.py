@@ -81,6 +81,10 @@ class TestCommandTemplateModel:
         assert tmpl.output_format == ""
         assert tmpl.parallel is None
         assert tmpl.timeout == 0
+        assert tmpl.accounts == ""
+        assert tmpl.team == ""
+        assert tmpl.tags == []
+        assert tmpl.save is None
 
     def test_round_trip(self):
         tmpl = CommandTemplate(
@@ -102,12 +106,33 @@ class TestCommandTemplateModel:
         assert restored.parallel == tmpl.parallel
         assert restored.timeout == tmpl.timeout
 
+    def test_round_trip_with_filters(self):
+        """New fields survive a serialise/deserialise round-trip."""
+        tmpl = CommandTemplate(
+            name="filtered",
+            command="sts get-caller-identity",
+            accounts="111111111111,222222222222",
+            team="platform",
+            tags=["env=prod", "owner=ops"],
+            save=True,
+        )
+        data = tmpl.to_dict()
+        restored = CommandTemplate.from_dict(data)
+        assert restored.accounts == tmpl.accounts
+        assert restored.team == tmpl.team
+        assert restored.tags == tmpl.tags
+        assert restored.save == tmpl.save
+
     def test_from_dict_minimal(self):
         """from_dict should work with only required keys."""
         tmpl = CommandTemplate.from_dict({"name": "x", "command": "ec2 describe-instances"})
         assert tmpl.name == "x"
         assert tmpl.parallel is None
         assert tmpl.timeout == 0
+        assert tmpl.accounts == ""
+        assert tmpl.team == ""
+        assert tmpl.tags == []
+        assert tmpl.save is None
 
 
 # ===========================================================================
@@ -259,6 +284,36 @@ class TestTemplateAddCommand:
         assert result.exit_code == 0
         assert "destructive" in result.output.lower() or "destructive" in (result.output + result.output).lower()
 
+    def test_add_with_account_filters(self, tmp_path):
+        """template add stores accounts, team, tags and save fields."""
+        tp = tmp_path / "templates.json"
+        result = self._run(
+            ['template', 'add', 'filtered-cmd',
+             '--command', 'sts get-caller-identity',
+             '--accounts', '111111111111,222222222222',
+             '--team', 'platform',
+             '--tag', 'env=prod',
+             '--tag', 'owner=ops',
+             '--save'],
+            tp,
+        )
+        assert result.exit_code == 0
+        assert "filtered-cmd" in result.output
+        assert "111111111111" in result.output
+        assert "platform" in result.output
+        assert "env=prod" in result.output
+        assert "True" in result.output
+
+        # Verify persisted correctly
+        mgr = TemplateManager(str(tp))
+        mgr.load_templates()
+        tmpl = mgr.get_template("filtered-cmd")
+        assert tmpl is not None
+        assert tmpl.accounts == "111111111111,222222222222"
+        assert tmpl.team == "platform"
+        assert tmpl.tags == ["env=prod", "owner=ops"]
+        assert tmpl.save is True
+
 
 # ===========================================================================
 # CLI: template list / show / delete
@@ -315,6 +370,44 @@ class TestTemplateListShowDelete:
         assert "show-me" in result.output
         assert "sts get-caller-identity" in result.output
         assert "My template" in result.output
+
+    def test_show_displays_filter_fields(self, tmp_path):
+        """template show renders accounts, team, tags and save when set."""
+        tp = self._make_mgr(tmp_path, [
+            CommandTemplate(
+                name="full",
+                command="sts get-caller-identity",
+                accounts="111111111111",
+                team="platform",
+                tags=["env=prod", "owner=ops"],
+                save=True,
+            ),
+        ])
+        result = self._run(['template', 'show', 'full'], tp)
+        assert result.exit_code == 0
+        assert "111111111111" in result.output
+        assert "platform" in result.output
+        assert "env=prod" in result.output
+        assert "True" in result.output
+
+    def test_list_shows_filter_extras(self, tmp_path):
+        """template list includes accounts/team/tags/save in extras line."""
+        tp = self._make_mgr(tmp_path, [
+            CommandTemplate(
+                name="with-filters",
+                command="sts get-caller-identity",
+                accounts="123456789012",
+                team="sre",
+                tags=["env=staging"],
+                save=False,
+            ),
+        ])
+        result = self._run(['template', 'list'], tp)
+        assert result.exit_code == 0
+        assert "accounts=123456789012" in result.output
+        assert "team=sre" in result.output
+        assert "env=staging" in result.output
+        assert "save=False" in result.output
 
     def test_show_missing(self, tmp_path):
         tp = self._make_mgr(tmp_path)
@@ -468,3 +561,123 @@ class TestRunWithTemplate:
         assert result.exit_code == 0
         # Should NOT print "destructive" error
         assert "destructive" not in result.output.lower()
+
+    # ------------------------------------------------------------------
+    # Account filter tests
+    # ------------------------------------------------------------------
+
+    def _run_with_template_no_cli_filters(self, template: CommandTemplate,
+                                          extra_args: list = None,
+                                          allow_destructive: bool = False):
+        """Like _run_with_template but does NOT pass --accounts on the CLI,
+        so template-level account filters are the only source."""
+        import tempfile, os
+        from multi_aws_tool.cli.commands import AppContext
+
+        col = _make_collection(_make_account("000000000001", "Acc1", "test-profile"))
+        am = _mock_account_manager(col)
+
+        tmp_dir = tempfile.mkdtemp()
+        tmgr = TemplateManager(os.path.join(tmp_dir, "templates.json"))
+        tmgr.add_template(template)
+        tmgr.save_templates()
+        tmpl_file = tmgr.templates_file
+
+        runner = CliRunner()
+
+        config_mock = MagicMock()
+        config_mock.get.side_effect = lambda s, k, fallback=None: {
+            ('general', 'region'): 'us-east-1',
+            ('output', 'format'): 'json',
+            ('output', 'pattern'): '!A-!c-!d',
+        }.get((s, k), fallback)
+        config_mock.get_bool.side_effect = lambda s, k, fallback=False: (
+            allow_destructive if k == 'allow-destructive-commands' else fallback
+        )
+
+        args = ['run', f'@{template.name}', '--dry-run'] + (extra_args or [])
+
+        with patch('multi_aws_tool.cli.commands.get_account_manager', return_value=am), \
+             patch('multi_aws_tool.cli.commands.load_or_create_config',
+                   return_value=config_mock), \
+             patch('multi_aws_tool.config.template_manager.TemplateManager',
+                   lambda *a, **kw: _patched_mgr(str(tmpl_file))), \
+             patch.object(AppContext, 'ensure_authenticated', return_value=None), \
+             patch('os.get_terminal_size', return_value=(120, 40)):
+            return runner.invoke(cli, args, catch_exceptions=False)
+
+    def test_template_accounts_applied_when_not_on_cli(self):
+        """accounts field from the template is used when --accounts not on CLI."""
+        tmpl = CommandTemplate(
+            name="acct-tmpl",
+            command="sts get-caller-identity",
+            accounts="000000000001",
+        )
+        result = self._run_with_template_no_cli_filters(tmpl)
+        assert result.exit_code == 0
+        # Should have resolved the account and printed its name / ID
+        assert "Acc1" in result.output or "000000000001" in result.output
+
+    def test_cli_accounts_override_template_accounts(self):
+        """--accounts on the CLI takes precedence over template accounts."""
+        tmpl = CommandTemplate(
+            name="acct-override",
+            command="sts get-caller-identity",
+            accounts="999999999999",   # different from what will be on CLI
+        )
+        # Pass --accounts on the CLI pointing to the real account in the mock
+        result = self._run_with_template(tmpl)
+        assert result.exit_code == 0
+        # CLI-specified account (000000000001) is present, not the template one
+        assert "000000000001" in result.output or "Acc1" in result.output
+
+    def test_template_save_flag_applied(self):
+        """save=True in a template triggers file-save behaviour."""
+        import tempfile
+        import os
+
+        tmp_out = tempfile.mkdtemp()
+
+        tmpl = CommandTemplate(
+            name="save-tmpl",
+            command="sts get-caller-identity",
+            accounts="000000000001",
+            save=True,
+        )
+
+        col = _make_collection(_make_account("000000000001", "Acc1", "test-profile"))
+        am = _mock_account_manager(col)
+
+        tmp_dir = tempfile.mkdtemp()
+        tmgr = TemplateManager(os.path.join(tmp_dir, "templates.json"))
+        tmgr.add_template(tmpl)
+        tmgr.save_templates()
+        tmpl_file = tmgr.templates_file
+
+        from multi_aws_tool.cli.commands import AppContext
+
+        runner = CliRunner()
+
+        config_mock = MagicMock()
+        config_mock.get.side_effect = lambda s, k, fallback=None: {
+            ('general', 'region'): 'us-east-1',
+            ('output', 'format'): 'json',
+            ('output', 'pattern'): '!A-!c-!d',
+            ('output', 'path'): tmp_out,
+        }.get((s, k), fallback)
+        config_mock.get_bool.return_value = False
+
+        args = ['run', '@save-tmpl', '--dry-run']
+
+        with patch('multi_aws_tool.cli.commands.get_account_manager', return_value=am), \
+             patch('multi_aws_tool.cli.commands.load_or_create_config',
+                   return_value=config_mock), \
+             patch('multi_aws_tool.config.template_manager.TemplateManager',
+                   lambda *a, **kw: _patched_mgr(str(tmpl_file))), \
+             patch.object(AppContext, 'ensure_authenticated', return_value=None), \
+             patch('os.get_terminal_size', return_value=(120, 40)):
+            result = runner.invoke(cli, args, catch_exceptions=False)
+
+        assert result.exit_code == 0
+        # The save path should be mentioned in dry-run output
+        assert tmp_out in result.output or "saved" in result.output.lower()

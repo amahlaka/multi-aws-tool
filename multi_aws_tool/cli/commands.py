@@ -1180,9 +1180,16 @@ def template():
 @click.option('--parallel/--sequential', default=None,
               help='Execution mode override (default: use global config)')
 @click.option('--timeout', type=int, default=0, help='Timeout override in seconds (0 = use default)')
+@click.option('--accounts', default='', help='Default account IDs (comma-separated) or file path for this template')
+@click.option('--team', default='', help='Default team name(s) to select accounts from for this template')
+@click.option('--tag', 'tags', multiple=True, metavar='KEY=VALUE',
+              help='Default tag filter(s) for this template (format: key=value). Can be specified multiple times.')
+@click.option('--save/--no-save', default=None,
+              help='Save command outputs to files by default when using this template')
 @click.option('--overwrite', is_flag=True, help='Overwrite an existing template with the same name')
 @click.pass_context
-def template_add(ctx, name, command, description, region, output_format, parallel, timeout, overwrite):
+def template_add(ctx, name, command, description, region, output_format, parallel, timeout,
+                 accounts, team, tags, save, overwrite):
     """Add or update a named command template"""
     from ..config.template_manager import get_template_manager, TemplateError
     from ..models.template import CommandTemplate
@@ -1216,6 +1223,10 @@ def template_add(ctx, name, command, description, region, output_format, paralle
             output_format=output_format,
             parallel=parallel,
             timeout=timeout,
+            accounts=accounts,
+            team=team,
+            tags=list(tags),
+            save=save,
         )
         tmgr.add_template(tmpl)
         tmgr.save_templates()
@@ -1232,7 +1243,15 @@ def template_add(ctx, name, command, description, region, output_format, paralle
             click.echo(f"   Parallel : {parallel}")
         if timeout:
             click.echo(f"   Timeout  : {timeout}s")
-        click.echo(f"\n💡 Run it with: multi-aws run @{name} --accounts <ids>")
+        if accounts:
+            click.echo(f"   Accounts : {accounts}")
+        if team:
+            click.echo(f"   Team     : {team}")
+        if tags:
+            click.echo(f"   Tags     : {', '.join(tags)}")
+        if save is not None:
+            click.echo(f"   Save     : {save}")
+        click.echo(f"\n💡 Run it with: multi-aws run @{name}")
 
     except TemplateError as exc:
         click.echo(f"❌ Template error: {exc}", err=True)
@@ -1272,6 +1291,14 @@ def template_list(ctx):
                 extras.append(f"parallel={tmpl.parallel}")
             if tmpl.timeout:
                 extras.append(f"timeout={tmpl.timeout}s")
+            if tmpl.accounts:
+                extras.append(f"accounts={tmpl.accounts}")
+            if tmpl.team:
+                extras.append(f"team={tmpl.team}")
+            if tmpl.tags:
+                extras.append(f"tags={','.join(tmpl.tags)}")
+            if tmpl.save is not None:
+                extras.append(f"save={tmpl.save}")
             if extras:
                 click.echo(f"    Options : {', '.join(extras)}")
             click.echo()
@@ -1307,6 +1334,11 @@ def template_show(ctx, name):
         parallel_str = "(use default)" if tmpl.parallel is None else str(tmpl.parallel)
         click.echo(f"  Parallel    : {parallel_str}")
         click.echo(f"  Timeout     : {tmpl.timeout or '(use default)'}")
+        click.echo(f"  Accounts    : {tmpl.accounts or '(none)'}")
+        click.echo(f"  Team        : {tmpl.team or '(none)'}")
+        click.echo(f"  Tags        : {', '.join(tmpl.tags) if tmpl.tags else '(none)'}")
+        save_str = "(use CLI flag)" if tmpl.save is None else str(tmpl.save)
+        click.echo(f"  Save        : {save_str}")
         click.echo(f"  Created     : {tmpl.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
         click.echo(f"  Updated     : {tmpl.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -1423,6 +1455,15 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
                 parallel = tmpl.parallel
             if tmpl.timeout and timeout == 300:  # 300 is the CLI default
                 timeout = tmpl.timeout
+            # Account filter defaults: apply only when not provided on the CLI
+            if tmpl.accounts and not accounts:
+                accounts = tmpl.accounts
+            if tmpl.team and not team:
+                team = tmpl.team
+            if tmpl.tags and not tags:
+                tags = tuple(tmpl.tags)
+            if tmpl.save is not None and not save:
+                save = tmpl.save
         else:
             _tmpl_output_format = None
 
