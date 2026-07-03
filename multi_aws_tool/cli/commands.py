@@ -1168,6 +1168,8 @@ def clean_duplicates(dry_run, prefix_only):
 @cli.command()
 @click.option('--accounts', help='Comma-separated account IDs or file path')
 @click.option('--team', help='Team name(s) to select accounts from')
+@click.option('--tag', 'tags', multiple=True, metavar='KEY=VALUE',
+              help='Filter accounts by tag (format: key=value). Can be specified multiple times.')
 @click.option('--output-dir', help='Directory to save output files')
 @click.option('--verbose', is_flag=True, help='Enable verbose output')
 @click.option('--save' , is_flag=True, help='Save command outputs to files')
@@ -1178,7 +1180,7 @@ def clean_duplicates(dry_run, prefix_only):
 @click.option('--dry-run', is_flag=True, help='Show what would be executed without running commands')
 @click.argument('command', nargs=-1)
 @click.pass_context
-def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
+def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
     """Execute AWS CLI command across multiple accounts using their configured profiles"""
     click.echo(f"⚡ Running command: {command}")
     click.echo(f"Across accounts: {accounts}")
@@ -1193,8 +1195,8 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         import json
         from datetime import datetime
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        if not accounts and not team:
-            click.echo("❌ You must specify either --accounts or --team to select accounts", err=True)
+        if not accounts and not team and not tags:
+            click.echo("❌ You must specify --accounts, --team, or --tag to select accounts", err=True)
             return
         if all_regions and region:
             click.echo("⚠️  --all-regions and --region are mutually exclusive; ignoring --region")
@@ -1205,6 +1207,15 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
         output_format = config_manager.get('output', 'format', 'json')
         output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
         
+        # Parse tag filters
+        tag_filter: dict = {}
+        for tag_item in (tags or []):
+            if '=' not in tag_item:
+                click.echo(f"❌ Invalid tag format: '{tag_item}'. Use key=value format.", err=True)
+                return
+            k, v = tag_item.split('=', 1)
+            tag_filter[k.strip()] = v.strip()
+
         # Parse account list
         account_manager = get_account_manager(ctx)
         if team:
@@ -1216,8 +1227,23 @@ def run(ctx: click.Context, command: tuple, accounts, team, output_dir, region, 
                 for acc in team_accounts:
                     if acc.id not in account_ids:
                         account_ids.append(acc.id)
-        else:
+        elif accounts:
             account_ids = parse_account_list(accounts)
+        else:
+            # tag-only selection: use all accounts
+            account_ids = [acc.id for acc in account_manager.get_accounts()]
+
+        # Apply tag filter if provided
+        if tag_filter:
+            if tag_filter:
+                click.echo(
+                    f"🏷️  Filtering by tag(s): "
+                    + ", ".join(f"{k}={v}" for k, v in tag_filter.items())
+                )
+            tagged_ids = {
+                acc.id for acc in account_manager.get_accounts_by_tags(tag_filter)
+            }
+            account_ids = [aid for aid in account_ids if aid in tagged_ids]
                 
         if not account_ids:
             click.echo("❌ No valid account IDs found", err=True)
@@ -1653,6 +1679,262 @@ def assign_team(ctx, accounts, team, overwrite):
         logger.exception("Unexpected error during team assignment")
         return
     
+
+@cli.command('list-tags')
+@click.option('--accounts', default=None,
+              help='Comma-separated account IDs or file path. '
+                   'If omitted together with --team, all accounts are listed.')
+@click.option('--team', default=None, help='Team name to filter accounts')
+@click.pass_context
+def list_tags(ctx, accounts, team):
+    """View tags stored on accounts"""
+    try:
+        account_manager = get_account_manager(ctx)
+        collection = account_manager.data_manager.load_accounts()
+
+        if accounts:
+            account_ids = parse_account_list(accounts)
+            selected = [collection.get_account(aid) for aid in account_ids]
+            selected = [a for a in selected if a is not None]
+        elif team:
+            selected = account_manager.get_accounts_by_team(team)
+        else:
+            selected = list(collection.accounts)
+
+        if not selected:
+            click.echo("ℹ️  No matching accounts found.")
+            return
+
+        click.echo(f"🏷️  Tags for {len(selected)} account(s):\n")
+        for account in selected:
+            header = f"  {account.name} ({account.id})"
+            if account.tags:
+                click.echo(header)
+                for key, value in sorted(account.tags.items()):
+                    click.echo(f"    {key} = {value}")
+            else:
+                click.echo(f"{header}  — no tags")
+
+    except AccountManagerError as e:
+        click.echo(f"❌ Error listing tags: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during list-tags")
+
+
+@cli.command('set-tag')
+@click.option('--accounts', default=None,
+              help='Comma-separated account IDs or file path')
+@click.option('--team', default=None, help='Team name to filter accounts')
+@click.option('--tag', 'tags', multiple=True, required=True, metavar='KEY=VALUE',
+              help='Tag to set (key=value). Can be specified multiple times.')
+@click.option('--overwrite', is_flag=True,
+              help='Overwrite existing tag values. Without this flag, existing tags are skipped.')
+@click.pass_context
+def set_tag(ctx, accounts, team, tags, overwrite):
+    """Set tags on accounts"""
+    if not accounts and not team:
+        click.echo("❌ Specify --accounts or --team to select accounts.", err=True)
+        return
+
+    # Parse tag pairs upfront so we can fail early on bad input
+    tag_pairs: dict = {}
+    for item in tags:
+        if '=' not in item:
+            click.echo(f"❌ Invalid tag format: '{item}'. Use key=value format.", err=True)
+            return
+        k, v = item.split('=', 1)
+        tag_pairs[k.strip()] = v.strip()
+
+    try:
+        account_manager = get_account_manager(ctx)
+        collection = account_manager.data_manager.load_accounts()
+
+        if accounts:
+            account_ids = parse_account_list(accounts)
+            selected = [collection.get_account(aid) for aid in account_ids]
+            selected = [a for a in selected if a is not None]
+        else:
+            selected = account_manager.get_accounts_by_team(team)
+
+        if not selected:
+            click.echo("ℹ️  No matching accounts found.")
+            return
+
+        click.echo(f"🏷️  Setting {len(tag_pairs)} tag(s) on {len(selected)} account(s)")
+        updates_made = 0
+
+        for account in selected:
+            account_updated = False
+            for key, value in tag_pairs.items():
+                existing = account.tags.get(key)
+                if existing is not None and existing == value:
+                    click.echo(f"  ✓ {account.name} ({account.id}): {key}={value} (unchanged)")
+                    continue
+                if existing is not None and not overwrite:
+                    click.echo(
+                        f"  ⚠️  {account.name} ({account.id}): {key} already set to "
+                        f"'{existing}', skipping (use --overwrite to replace)"
+                    )
+                    continue
+                old_display = f"'{existing}'" if existing is not None else "unset"
+                account.tags[key] = value
+                account_updated = True
+                click.echo(
+                    f"  ✅ {account.name} ({account.id}): {key} {old_display} → '{value}'"
+                )
+            if account_updated:
+                from datetime import datetime
+                account.last_updated = datetime.now()
+                updates_made += 1
+
+        if updates_made > 0:
+            account_manager.data_manager.save_accounts(collection)
+            click.echo(f"\n💾 Updated {updates_made} account(s). "
+                       f"Saved to: {account_manager.data_manager.file_path}")
+        else:
+            click.echo("\n✅ No updates were necessary.")
+
+    except AccountManagerError as e:
+        click.echo(f"❌ Error setting tags: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during set-tag")
+
+
+@cli.command('remove-tag')
+@click.option('--accounts', default=None,
+              help='Comma-separated account IDs or file path')
+@click.option('--team', default=None, help='Team name to filter accounts')
+@click.option('--key', 'keys', multiple=True, required=True,
+              help='Tag key to remove. Can be specified multiple times.')
+@click.pass_context
+def remove_tag(ctx, accounts, team, keys):
+    """Remove tags from accounts"""
+    if not accounts and not team:
+        click.echo("❌ Specify --accounts or --team to select accounts.", err=True)
+        return
+
+    try:
+        account_manager = get_account_manager(ctx)
+        collection = account_manager.data_manager.load_accounts()
+
+        if accounts:
+            account_ids = parse_account_list(accounts)
+            selected = [collection.get_account(aid) for aid in account_ids]
+            selected = [a for a in selected if a is not None]
+        else:
+            selected = account_manager.get_accounts_by_team(team)
+
+        if not selected:
+            click.echo("ℹ️  No matching accounts found.")
+            return
+
+        click.echo(f"🗑️  Removing tag key(s) {list(keys)} from {len(selected)} account(s)")
+        updates_made = 0
+
+        for account in selected:
+            account_updated = False
+            for key in keys:
+                if key in account.tags:
+                    old_value = account.tags.pop(key)
+                    account_updated = True
+                    click.echo(
+                        f"  ✅ {account.name} ({account.id}): removed {key}='{old_value}'"
+                    )
+                else:
+                    click.echo(
+                        f"  ✓ {account.name} ({account.id}): key '{key}' not present, skipping"
+                    )
+            if account_updated:
+                from datetime import datetime
+                account.last_updated = datetime.now()
+                updates_made += 1
+
+        if updates_made > 0:
+            account_manager.data_manager.save_accounts(collection)
+            click.echo(f"\n💾 Updated {updates_made} account(s). "
+                       f"Saved to: {account_manager.data_manager.file_path}")
+        else:
+            click.echo("\n✅ No updates were necessary.")
+
+    except AccountManagerError as e:
+        click.echo(f"❌ Error removing tags: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during remove-tag")
+
+
+@cli.command('sync-tags')
+@click.option('--account', 'account_id', default=None,
+              help='Account ID of the management or delegated-admin account to use for '
+                   'Organizations access. The account must already be configured with a '
+                   'profile (run \'profiles\' first). If omitted, the default credential '
+                   'chain is used.')
+@click.pass_context
+def sync_tags(ctx, account_id):
+    """Sync account tags from AWS Organizations"""
+    click.echo("🏷️  Syncing account tags from AWS Organizations")
+
+    try:
+        account_manager = get_account_manager(ctx)
+
+        profile_name = None
+        if account_id:
+            account = account_manager.get_account(account_id)
+            if not account:
+                click.echo(
+                    f"❌ Account '{account_id}' not found. Run 'init' to discover accounts.",
+                    err=True,
+                )
+                return
+            if not account.profile_name:
+                click.echo(
+                    f"❌ No profile configured for account {account_id} ({account.name}).\n"
+                    f"   Run 'profiles --accounts {account_id} --role <role-name>' first.",
+                    err=True,
+                )
+                return
+            profile_name = account.profile_name
+            click.echo(
+                f"🔑 Using account {account_id} ({account.name}) "
+                f"with profile '{profile_name}' for Organizations access"
+            )
+        else:
+            click.echo("🔑 Using default credentials for Organizations access")
+
+        counts = account_manager.sync_account_tags(profile_name=profile_name)
+
+        synced = counts['synced']
+        skipped = counts['skipped']
+        failed = counts['failed']
+
+        click.echo(f"\n📊 Tag sync results:")
+        if synced:
+            click.echo(f"  ✅ Synced tags for {synced} account(s)")
+        if skipped:
+            click.echo(f"  ⚪ No tags found for {skipped} account(s)")
+        if failed:
+            click.echo(f"  ❌ Failed for {failed} account(s)")
+
+        if synced == 0 and skipped > 0 and failed == 0:
+            click.echo(
+                "\nℹ️  No tags were found. Possible reasons:\n"
+                "  • The account(s) have no tags in AWS Organizations\n"
+                "  • The credentials do not have Organizations access\n"
+                "  • Your organization does not use account tags\n"
+                "Try specifying --account with a management or delegated-admin account ID "
+                "that has organizations:ListTagsForResource permission."
+            )
+        elif synced > 0:
+            click.echo(f"\n💾 Tag data saved to: {account_manager.data_manager.file_path}")
+
+    except AccountManagerError as e:
+        click.echo(f"❌ Tag sync error: {e}", err=True)
+    except Exception as e:
+        click.echo(f"❌ Unexpected error: {e}", err=True)
+        logger.exception("Unexpected error during tag sync")
+
 
 @cli.command()
 @click.option('--profiles', is_flag=True, help='Clean up generated profiles')

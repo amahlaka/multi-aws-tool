@@ -124,7 +124,8 @@ class Account:
             'roles': [role.to_dict() for role in self.roles],
             'profile_name': self.profile_name,
             'last_updated': self.last_updated.isoformat(),
-            'product_team': self.product_team
+            'product_team': self.product_team,
+            'tags': self.tags
         }
     
     @classmethod
@@ -137,7 +138,8 @@ class Account:
             roles=[Role.from_dict(role_data) for role_data in data.get('roles', [])],
             profile_name=data.get('profile_name'),
             last_updated=data.get('last_updated', datetime.now().isoformat()),
-            product_team=data.get('product_team')
+            product_team=data.get('product_team'),
+            tags=data.get('tags', {})
         )
     
     def __str__(self) -> str:
@@ -206,6 +208,13 @@ class AccountCollection:
     def get_accounts_by_name(self, name: str) -> List[Account]:
         """Get all accounts with a specific name"""
         return [account for account in self.accounts if account.name == name]
+    
+    def get_accounts_by_tags(self, tags: Dict[str, str]) -> List['Account']:
+        """Get all accounts that match all specified tags (key=value pairs)"""
+        return [
+            account for account in self.accounts
+            if all(account.tags.get(k) == v for k, v in tags.items())
+        ]
     
     def get_active_accounts(self) -> List[Account]:
         """Get all active accounts"""
