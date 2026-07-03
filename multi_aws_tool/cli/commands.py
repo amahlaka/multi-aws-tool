@@ -1165,6 +1165,222 @@ def clean_duplicates(dry_run, prefix_only):
         click.echo(f"❌ Duplicate cleanup error: {e}", err=True)
         logger.exception("Unexpected error during duplicate cleanup")
 
+@cli.group()
+def template():
+    """Manage command templates / presets"""
+
+
+@template.command('add')
+@click.argument('name')
+@click.option('--command', required=True, help='AWS CLI command to save (e.g. "sts get-caller-identity")')
+@click.option('--description', default='', help='Human-readable description of the template')
+@click.option('--region', default='', help='AWS region override for this template')
+@click.option('--output-format', default='', type=click.Choice(['', 'json', 'yaml', 'txt', 'csv']),
+              help='Output format override for this template')
+@click.option('--parallel/--sequential', default=None,
+              help='Execution mode override (default: use global config)')
+@click.option('--timeout', type=int, default=0, help='Timeout override in seconds (0 = use default)')
+@click.option('--accounts', default='', help='Default account IDs (comma-separated) or file path for this template')
+@click.option('--team', default='', help='Default team name(s) to select accounts from for this template')
+@click.option('--tag', 'tags', multiple=True, metavar='KEY=VALUE',
+              help='Default tag filter(s) for this template (format: key=value). Can be specified multiple times.')
+@click.option('--save/--no-save', default=None,
+              help='Save command outputs to files by default when using this template')
+@click.option('--overwrite', is_flag=True, help='Overwrite an existing template with the same name')
+@click.pass_context
+def template_add(ctx, name, command, description, region, output_format, parallel, timeout,
+                 accounts, team, tags, save, overwrite):
+    """Add or update a named command template"""
+    from ..config.template_manager import get_template_manager, TemplateError
+    from ..models.template import CommandTemplate
+    from ..config.schema import is_destructive_command
+
+    try:
+        config_manager = ctx.obj.config_manager or load_or_create_config()
+        allow_destructive = config_manager.get_bool('security', 'allow-destructive-commands', False)
+
+        if is_destructive_command(command) and not allow_destructive:
+            click.echo(
+                f"❌ Command '{command}' is considered destructive. "
+                "Set allow-destructive-commands = true in config to save such templates.",
+                err=True,
+            )
+            return
+
+        tmgr = get_template_manager(config_manager)
+
+        if tmgr.template_exists(name) and not overwrite:
+            click.echo(
+                f"❌ Template '{name}' already exists. Use --overwrite to replace it.", err=True
+            )
+            return
+
+        tmpl = CommandTemplate(
+            name=name,
+            command=command,
+            description=description,
+            region=region,
+            output_format=output_format,
+            parallel=parallel,
+            timeout=timeout,
+            accounts=accounts,
+            team=team,
+            tags=list(tags),
+            save=save,
+        )
+        tmgr.add_template(tmpl)
+        tmgr.save_templates()
+
+        click.echo(f"✅ Template '{name}' saved.")
+        click.echo(f"   Command  : {command}")
+        if description:
+            click.echo(f"   Desc     : {description}")
+        if region:
+            click.echo(f"   Region   : {region}")
+        if output_format:
+            click.echo(f"   Format   : {output_format}")
+        if parallel is not None:
+            click.echo(f"   Parallel : {parallel}")
+        if timeout:
+            click.echo(f"   Timeout  : {timeout}s")
+        if accounts:
+            click.echo(f"   Accounts : {accounts}")
+        if team:
+            click.echo(f"   Team     : {team}")
+        if tags:
+            click.echo(f"   Tags     : {', '.join(tags)}")
+        if save is not None:
+            click.echo(f"   Save     : {save}")
+        click.echo(f"\n💡 Run it with: multi-aws run @{name}")
+
+    except TemplateError as exc:
+        click.echo(f"❌ Template error: {exc}", err=True)
+    except Exception as exc:
+        click.echo(f"❌ Unexpected error: {exc}", err=True)
+        logger.exception("Unexpected error while adding template")
+
+
+@template.command('list')
+@click.pass_context
+def template_list(ctx):
+    """List all saved command templates"""
+    from ..config.template_manager import get_template_manager, TemplateError
+
+    try:
+        config_manager = ctx.obj.config_manager or load_or_create_config()
+        tmgr = get_template_manager(config_manager)
+        templates = tmgr.list_templates()
+
+        if not templates:
+            click.echo("ℹ️  No templates defined yet.")
+            click.echo("  Use 'multi-aws template add <name> --command \"<cmd>\"' to create one.")
+            return
+
+        click.echo(f"📋 {len(templates)} template(s):\n")
+        for tmpl in templates:
+            click.echo(f"  @{tmpl.name}")
+            click.echo(f"    Command : {tmpl.command}")
+            if tmpl.description:
+                click.echo(f"    Desc    : {tmpl.description}")
+            extras = []
+            if tmpl.region:
+                extras.append(f"region={tmpl.region}")
+            if tmpl.output_format:
+                extras.append(f"format={tmpl.output_format}")
+            if tmpl.parallel is not None:
+                extras.append(f"parallel={tmpl.parallel}")
+            if tmpl.timeout:
+                extras.append(f"timeout={tmpl.timeout}s")
+            if tmpl.accounts:
+                extras.append(f"accounts={tmpl.accounts}")
+            if tmpl.team:
+                extras.append(f"team={tmpl.team}")
+            if tmpl.tags:
+                extras.append(f"tags={','.join(tmpl.tags)}")
+            if tmpl.save is not None:
+                extras.append(f"save={tmpl.save}")
+            if extras:
+                click.echo(f"    Options : {', '.join(extras)}")
+            click.echo()
+
+    except TemplateError as exc:
+        click.echo(f"❌ Template error: {exc}", err=True)
+    except Exception as exc:
+        click.echo(f"❌ Unexpected error: {exc}", err=True)
+        logger.exception("Unexpected error while listing templates")
+
+
+@template.command('show')
+@click.argument('name')
+@click.pass_context
+def template_show(ctx, name):
+    """Show details of a single template"""
+    from ..config.template_manager import get_template_manager, TemplateError
+
+    try:
+        config_manager = ctx.obj.config_manager or load_or_create_config()
+        tmgr = get_template_manager(config_manager)
+        tmpl = tmgr.get_template(name)
+
+        if not tmpl:
+            click.echo(f"❌ Template '{name}' not found.", err=True)
+            return
+
+        click.echo(f"📄 Template: @{tmpl.name}")
+        click.echo(f"  Command     : {tmpl.command}")
+        click.echo(f"  Description : {tmpl.description or '(none)'}")
+        click.echo(f"  Region      : {tmpl.region or '(use default)'}")
+        click.echo(f"  Format      : {tmpl.output_format or '(use default)'}")
+        parallel_str = "(use default)" if tmpl.parallel is None else str(tmpl.parallel)
+        click.echo(f"  Parallel    : {parallel_str}")
+        click.echo(f"  Timeout     : {tmpl.timeout or '(use default)'}")
+        click.echo(f"  Accounts    : {tmpl.accounts or '(none)'}")
+        click.echo(f"  Team        : {tmpl.team or '(none)'}")
+        click.echo(f"  Tags        : {', '.join(tmpl.tags) if tmpl.tags else '(none)'}")
+        save_str = "(use CLI flag)" if tmpl.save is None else str(tmpl.save)
+        click.echo(f"  Save        : {save_str}")
+        click.echo(f"  Created     : {tmpl.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"  Updated     : {tmpl.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    except TemplateError as exc:
+        click.echo(f"❌ Template error: {exc}", err=True)
+    except Exception as exc:
+        click.echo(f"❌ Unexpected error: {exc}", err=True)
+        logger.exception("Unexpected error while showing template")
+
+
+@template.command('delete')
+@click.argument('name')
+@click.option('--confirm', is_flag=True, help='Skip confirmation prompt')
+@click.pass_context
+def template_delete(ctx, name, confirm):
+    """Delete a saved template"""
+    from ..config.template_manager import get_template_manager, TemplateError
+
+    try:
+        config_manager = ctx.obj.config_manager or load_or_create_config()
+        tmgr = get_template_manager(config_manager)
+
+        if not tmgr.template_exists(name):
+            click.echo(f"❌ Template '{name}' not found.", err=True)
+            return
+
+        if not confirm:
+            if not click.confirm(f"Delete template '{name}'?"):
+                click.echo("Deletion cancelled.")
+                return
+
+        tmgr.delete_template(name)
+        tmgr.save_templates()
+        click.echo(f"✅ Template '{name}' deleted.")
+
+    except TemplateError as exc:
+        click.echo(f"❌ Template error: {exc}", err=True)
+    except Exception as exc:
+        click.echo(f"❌ Unexpected error: {exc}", err=True)
+        logger.exception("Unexpected error while deleting template")
+
+
 @cli.command()
 @click.option('--accounts', help='Comma-separated account IDs or file path')
 @click.option('--team', help='Team name(s) to select accounts from')
@@ -1181,20 +1397,96 @@ def clean_duplicates(dry_run, prefix_only):
 @click.argument('command', nargs=-1)
 @click.pass_context
 def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, region, all_regions, parallel, timeout, dry_run, save, verbose):
-    """Execute AWS CLI command across multiple accounts using their configured profiles"""
-    click.echo(f"⚡ Running command: {command}")
-    click.echo(f"Across accounts: {accounts}")
-    click.echo(f"Selected team: {team}")
-    click.echo("Using each account's configured profile")
-    print(ctx.max_content_width)
-    
+    """Execute AWS CLI command across multiple accounts using their configured profiles.
+
+    The COMMAND argument may reference a saved template by prefixing its name with @,
+    for example: multi-aws run @my-template --accounts 123456789012
+    """
+    import subprocess
+    import os
+    import json
+    from datetime import datetime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     try:
         from models.result import CommandResult, ResultStatus
-        import subprocess
-        import os
-        import json
-        from datetime import datetime
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    except ImportError:
+        from ..models.result import CommandResult, ResultStatus
+
+    try:
+        config_manager = ctx.obj.config_manager or load_or_create_config()
+
+        # ------------------------------------------------------------------
+        # Template resolution: if the sole argument starts with '@' treat it
+        # as a reference to a saved template and apply its settings.
+        # ------------------------------------------------------------------
+        if command and len(command) == 1 and command[0].startswith('@'):
+            template_name = command[0][1:]
+            from ..config.template_manager import get_template_manager, TemplateError
+            try:
+                tmgr = get_template_manager(config_manager)
+                tmpl = tmgr.get_template(template_name)
+            except TemplateError as exc:
+                click.echo(f"❌ Failed to load templates: {exc}", err=True)
+                return
+
+            if tmpl is None:
+                click.echo(f"❌ Template '@{template_name}' not found.", err=True)
+                click.echo("  Run 'multi-aws template list' to see available templates.")
+                return
+
+            click.echo(f"📄 Using template: @{tmpl.name}")
+            if tmpl.description:
+                click.echo(f"   ({tmpl.description})")
+
+            # Expand the template command into a tuple of tokens
+            command = tuple(tmpl.command.split())
+
+            # Apply template overrides only when the user hasn't supplied them
+            if tmpl.region and not region:
+                region = tmpl.region
+            if tmpl.output_format:
+                # output_format is read later from config_manager; we override
+                # it via a local variable handled below
+                _tmpl_output_format = tmpl.output_format
+            else:
+                _tmpl_output_format = None
+            if tmpl.parallel is not None and not parallel:
+                parallel = tmpl.parallel
+            if tmpl.timeout and timeout == 300:  # 300 is the CLI default
+                timeout = tmpl.timeout
+            # Account filter defaults: apply only when not provided on the CLI
+            if tmpl.accounts and not accounts:
+                accounts = tmpl.accounts
+            if tmpl.team and not team:
+                team = tmpl.team
+            if tmpl.tags and not tags:
+                tags = tuple(tmpl.tags)
+            if tmpl.save is not None and not save:
+                save = tmpl.save
+        else:
+            _tmpl_output_format = None
+
+        # ------------------------------------------------------------------
+        # Security check: validate the resolved command
+        # ------------------------------------------------------------------
+        from ..config.schema import is_destructive_command
+        allow_destructive = config_manager.get_bool('security', 'allow-destructive-commands', False)
+        resolved_cmd_str = ' '.join(command)
+        if is_destructive_command(resolved_cmd_str) and not allow_destructive:
+            click.echo(
+                f"❌ Command '{resolved_cmd_str}' is considered destructive. "
+                "Set allow-destructive-commands = true in config to run it.",
+                err=True,
+            )
+            return
+
+        click.echo(f"⚡ Running command: {command}")
+        click.echo(f"Across accounts: {accounts}")
+        click.echo(f"Selected team: {team}")
+        click.echo("Using each account's configured profile")
+        print(ctx.max_content_width)
+
         if not accounts and not team and not tags:
             click.echo("❌ You must specify --accounts, --team, or --tag to select accounts", err=True)
             return
@@ -1202,9 +1494,8 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
             click.echo("⚠️  --all-regions and --region are mutually exclusive; ignoring --region")
             region = None
         # Get configuration values
-        config_manager = ctx.obj.config_manager or load_or_create_config()
         config_region = region or config_manager.get('general', 'region', 'us-east-1')
-        output_format = config_manager.get('output', 'format', 'json')
+        output_format = _tmpl_output_format or config_manager.get('output', 'format', 'json')
         output_pattern = config_manager.get('output', 'pattern', '!A-!c-!d')  # Get configurable pattern
         
         # Parse tag filters
