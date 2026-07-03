@@ -182,6 +182,40 @@ class TestNavHelper:
         assert sel == 4
 
 
+class TestRunWorkflowInput:
+    def test_step_enter_command_reprompts_on_empty_input(self):
+        app = TUIApp(_mock_account_manager(_make_collection()), None)
+        app.stdscr = MagicMock()
+        app.stdscr.getmaxyx.return_value = (24, 100)
+
+        with patch.object(app, "_draw_header", return_value=1), \
+             patch.object(app, "_draw_footer"), \
+             patch.object(app, "_prompt", side_effect=["", "sts get-caller-identity"]), \
+             patch.object(app, "_flash") as flash, \
+             patch("multi_aws_tool.tui.app.curses.color_pair", return_value=0):
+            value = app._step_enter_command()
+
+        assert value == "sts get-caller-identity"
+        flash.assert_called_once_with("Command cannot be empty.", is_error=True)
+
+    def test_prompt_uses_minimum_input_width(self):
+        app = TUIApp(_mock_account_manager(_make_collection()), None)
+        app.stdscr = MagicMock()
+        app.stdscr.getmaxyx.return_value = (10, 10)
+        app.stdscr.getstr.return_value = b"x"
+
+        with patch("multi_aws_tool.tui.app.curses.curs_set"), \
+             patch("multi_aws_tool.tui.app.curses.echo"), \
+             patch("multi_aws_tool.tui.app.curses.noecho"), \
+             patch("multi_aws_tool.tui.app.curses.flushinp"), \
+             patch("multi_aws_tool.tui.app.curses.color_pair", return_value=0):
+            value = app._prompt("Long label to force narrow width")
+
+        assert value == "x"
+        _, _, max_len = app.stdscr.getstr.call_args[0]
+        assert max_len == 1
+
+
 # ─── TUI command smoke test ───────────────────────────────────────────────────
 
 class TestTuiCommand:

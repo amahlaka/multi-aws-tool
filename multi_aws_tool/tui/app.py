@@ -297,7 +297,8 @@ class TUIApp:
         self.stdscr.move(h - 2, col)
         self.stdscr.refresh()
         try:
-            raw = self.stdscr.getstr(h - 2, col, w - col - 2)
+            curses.flushinp()
+            raw = self.stdscr.getstr(h - 2, col, max(1, w - col - 2))
             value = raw.decode('utf-8', errors='replace')
         except (curses.error, UnicodeDecodeError):
             value = None
@@ -1982,23 +1983,24 @@ class TUIApp:
 
     def _step_enter_command(self, default: str = '') -> Optional[str]:
         """Step 2: enter an AWS CLI command."""
-        self.stdscr.clear()
-        h, w = self.stdscr.getmaxyx()
-        self._draw_header('Enter Command  (Step 2 of 4)', 'AWS CLI command without "aws" prefix')
-        self.stdscr.attron(curses.color_pair(_CP_DIM))
-        self.stdscr.addstr(3, 2, 'Examples:  sts get-caller-identity')
-        self.stdscr.addstr(4, 2, '           ec2 describe-instances --region us-east-1')
-        self.stdscr.addstr(5, 2, '           iam list-users')
-        self.stdscr.attroff(curses.color_pair(_CP_DIM))
-        self._draw_footer(' Type command  Enter Confirm  Esc Cancel ')
-        self.stdscr.refresh()
-        value = self._prompt('AWS command', default=default)
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            return None
-        return value
+        while True:
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            self._draw_header('Enter Command  (Step 2 of 4)', 'AWS CLI command without "aws" prefix')
+            self.stdscr.attron(curses.color_pair(_CP_DIM))
+            self.stdscr.addstr(3, 2, 'Examples:  sts get-caller-identity')
+            self.stdscr.addstr(4, 2, '           ec2 describe-instances --region us-east-1')
+            self.stdscr.addstr(5, 2, '           iam list-users')
+            self.stdscr.attroff(curses.color_pair(_CP_DIM))
+            self._draw_footer(' Type command  Enter Confirm  Esc Cancel ')
+            self.stdscr.refresh()
+            value = self._prompt('AWS command', default=default)
+            if value is None:
+                return None
+            value = value.strip()
+            if value:
+                return value
+            self._flash('Command cannot be empty.', is_error=True)
 
     def _step_options(self, template: Any = None) -> Optional[Dict[str, Any]]:
         """Step 3: configure run options; returns option dict or None to cancel."""
