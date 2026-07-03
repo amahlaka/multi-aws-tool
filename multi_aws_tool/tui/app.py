@@ -4,10 +4,13 @@ Provides an interactive terminal interface using Python curses for:
   - Browsing and filtering AWS accounts
   - Managing teams and their member accounts
   - Viewing and running command templates
+  - Creating command templates directly in the TUI
+  - Browsing saved run results with visual status bars
   - A guided multi-step command execution workflow
 """
 
 import curses
+import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -97,6 +100,7 @@ class TUIApp:
             elif screen == 'accounts':  screen = self._screen_accounts()
             elif screen == 'teams':     screen = self._screen_teams()
             elif screen == 'templates': screen = self._screen_templates()
+            elif screen == 'results':   screen = self._screen_results()
             elif screen == 'run':       screen = self._screen_run_workflow()
             else:                       break
 
@@ -342,6 +346,67 @@ class TUIApp:
             else:
                 return
 
+    @staticmethod
+    def _ratio_bar(value: int, total: int, width: int = 20, fill: str = '█') -> str:
+        """Return a fixed-width bar visualising value/total."""
+        if width <= 0:
+            return ''
+        if total <= 0:
+            return '░' * width
+        ratio = max(0.0, min(1.0, float(value) / float(total)))
+        filled = int(round(ratio * width))
+        filled = max(0, min(width, filled))
+        return (fill * filled) + ('░' * (width - filled))
+
+    def _results_output_path(self) -> str:
+        """Resolve the directory where run summaries are saved."""
+        default = '~/.multi-aws/outputs'
+        if self.config_manager is None:
+            return os.path.expanduser(default)
+        try:
+            configured = self.config_manager.get('output', 'path', default)
+        except Exception:
+            configured = default
+        return os.path.expanduser(configured)
+
+    def _load_saved_results(self) -> List[Dict[str, Any]]:
+        """Load execution summary files from the configured output directory."""
+        from ..output import OutputParser
+
+        output_path = self._results_output_path()
+        parser = OutputParser(output_path)
+        try:
+            files = sorted(
+                parser.find_execution_summaries(),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            return []
+
+        records: List[Dict[str, Any]] = []
+        for path in files:
+            try:
+                summary = parser.parse_execution_summary(path)
+            except Exception:
+                continue
+            command = summary.command if isinstance(summary.command, str) else ' '.join(summary.command or [])
+            records.append(
+                {
+                    'file_name': path.name,
+                    'file_path': str(path),
+                    'timestamp': str(summary.timestamp),
+                    'command': command,
+                    'total': int(summary.total_accounts),
+                    'success': int(summary.successful_accounts),
+                    'failed': int(summary.failed_accounts),
+                    'timeout': int(summary.timeout_accounts),
+                    'mode': str(summary.execution_mode),
+                    'summary': summary,
+                }
+            )
+        return records
+
     # ─── Screen: Main menu ────────────────────────────────────────────────
 
     def _screen_main(self) -> Optional[str]:
@@ -350,6 +415,7 @@ class TUIApp:
             ('A', 'Browse Accounts',       'accounts'),
             ('T', 'Manage Teams',          'teams'),
             ('P', 'Templates / Presets',   'templates'),
+            ('V', 'Browse Run Results',    'results'),
             ('R', 'Run Command Workflow',  'run'),
             ('Q', 'Quit',                  None),
         ]
@@ -856,7 +922,7 @@ class TUIApp:
                 self._draw_list_rows(rows, selected, start, visible, scroll)
 
             self._draw_footer(
-                ' ↑↓ Navigate   Enter Details   R Run template   D Delete   Q Back '
+                ' ↑↓ Navigate   Enter Details   N New   R Run   D Delete   Q Back '
             )
             self.stdscr.refresh()
 
@@ -867,6 +933,8 @@ class TUIApp:
                 self._show_template_detail(templates[selected])
             elif total and key in (ord('r'), ord('R')):
                 return self._run_from_template(templates[selected])
+            elif key in (ord('n'), ord('N')):
+                self._create_template()
             elif total and key in (ord('d'), ord('D')):
                 tmpl = templates[selected]
                 if self._confirm(f'Delete template "{tmpl.name}"?'):
@@ -880,6 +948,137 @@ class TUIApp:
                         self._flash(f'Error: {exc}', is_error=True)
             else:
                 selected, scroll = self._nav(key, selected, scroll, total, visible)
+
+    def _create_template(self) -> None:
+        """Create a template directly in the TUI."""
+        from ..config.schema import is_destructive_command
+        from ..config.template_manager import get_template_manager
+        from ..models.template import CommandTemplate
+
+        name = self._prompt('Template name')
+        if not name or not name.strip():
+            return
+        name = name.strip()
+
+        command = self._prompt('AWS command (without "aws")')
+        if not command or not command.strip():
+            self._flash('Template command is required.', is_error=True)
+            return
+        command = command.strip()
+
+        description = self._prompt('Description (optional)', default='') or ''
+        description = description.strip()
+
+        allow_destructive = False
+        if self.config_manager is not None:
+            try:
+                allow_destructive = self.config_manager.get_bool(
+                    'security', 'allow-destructive-commands', False
+                )
+            except Exception:
+                allow_destructive = False
+        if is_destructive_command(command) and not allow_destructive:
+            self._flash('Command is destructive and blocked by config.', is_error=True)
+            return
+
+        try:
+            tmgr = get_template_manager(self.config_manager)
+            if tmgr.template_exists(name) and not self._confirm(f'Overwrite template "{name}"?'):
+                self._flash('Template creation cancelled.')
+                return
+            tmgr.add_template(
+                CommandTemplate(
+                    name=name,
+                    command=command,
+                    description=description,
+                )
+            )
+            tmgr.save_templates()
+            self._flash(f'Template "{name}" saved.')
+        except Exception as exc:
+            self._flash(f'Failed to save template: {exc}', is_error=True)
+
+    # ─── Screen: Results browser ───────────────────────────────────────────
+
+    def _screen_results(self) -> Optional[str]:
+        """Browse execution summaries with quick visual stats."""
+        selected = 0
+        scroll = 0
+
+        while True:
+            records = self._load_saved_results()
+            total = len(records)
+            output_path = self._results_output_path()
+            h, _ = self.stdscr.getmaxyx()
+
+            self.stdscr.clear()
+            start = self._draw_header('Run Results', f'{total} execution summary file(s)  ·  {output_path}')
+            visible = h - start - 1
+
+            if not records:
+                self.stdscr.attron(curses.color_pair(_CP_DIM))
+                self.stdscr.addstr(start, 2, 'No saved run summaries found. Use run with --save first.')
+                self.stdscr.attroff(curses.color_pair(_CP_DIM))
+            else:
+                rows = []
+                for r in records:
+                    ts = _truncate(str(r['timestamp']).replace('T', ' ')[:19], 19)
+                    cmd = _truncate(r['command'], 36)
+                    bar = self._ratio_bar(r['success'], r['total'], width=10)
+                    rows.append(
+                        f'{ts}  S:{r["success"]}/{r["total"]:<3}  F:{r["failed"]:<3}  T:{r["timeout"]:<3}  {bar}  {cmd}'
+                    )
+                selected = min(selected, total - 1) if total else 0
+                self._draw_list_rows(rows, selected, start, visible, scroll)
+
+            self._draw_footer(' ↑↓ Navigate   Enter Details   R Refresh   Q Back ')
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (_ESC, ord('q'), ord('Q')):
+                return 'main'
+            elif key in (ord('r'), ord('R')):
+                continue
+            elif total and _is_enter(key):
+                self._show_result_detail(records[selected])
+            else:
+                selected, scroll = self._nav(key, selected, scroll, total, visible)
+
+    def _show_result_detail(self, record: Dict[str, Any]) -> None:
+        """Show details for one execution summary, including visual breakdown."""
+        summary = record['summary']
+        total = record['total']
+        success = record['success']
+        failed = record['failed']
+        timeout = record['timeout']
+
+        lines = [
+            f'File:      {record["file_name"]}',
+            f'Timestamp: {record["timestamp"]}',
+            f'Command:   aws {record["command"]}',
+            f'Mode:      {record["mode"]}',
+            f'Accounts:  {total}',
+            '',
+            'Status overview:',
+            f'  Success  {success:>4}/{total:<4}  {self._ratio_bar(success, total, width=28)}',
+            f'  Failed   {failed:>4}/{total:<4}  {self._ratio_bar(failed, total, width=28)}',
+            f'  Timeout  {timeout:>4}/{total:<4}  {self._ratio_bar(timeout, total, width=28)}',
+            '',
+            f'Per-account results ({len(summary.results)}):',
+        ]
+
+        for res in summary.results:
+            status = str(getattr(res, 'status', 'UNKNOWN')).upper()
+            marker = '✓' if 'SUCCESS' in status else ('⏰' if 'TIMEOUT' in status else '✗')
+            name = getattr(res, 'account_name', None) or getattr(res, 'account_id', 'unknown')
+            account_id = getattr(res, 'account_id', 'unknown')
+            exec_time = float(getattr(res, 'execution_time', 0.0) or 0.0)
+            lines.append(f'  {marker} {name} ({account_id})  [{status}]  {exec_time:.2f}s')
+            err = (getattr(res, 'error', '') or '').strip()
+            if err and 'SUCCESS' not in status:
+                lines.append(f'      {_truncate(err, 140)}')
+
+        self._detail_page('Execution Result Detail', lines)
 
     def _show_template_detail(self, tmpl: Any) -> None:
         lines = [

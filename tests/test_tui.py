@@ -2,6 +2,7 @@
 Tests for the TUI module and the `tui` CLI command.
 """
 
+import json
 import pytest
 from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
@@ -273,3 +274,46 @@ class TestTuiCommand:
             )
         assert result.exit_code == 0
         assert '❌' in result.output
+
+
+class TestResultsHelpers:
+    def test_ratio_bar_handles_zero_total(self):
+        assert TUIApp._ratio_bar(0, 0, width=5) == "░░░░░"
+
+    def test_ratio_bar_renders_fill(self):
+        assert TUIApp._ratio_bar(3, 4, width=4) == "███░"
+
+    def test_load_saved_results_parses_execution_summary(self, tmp_path):
+        summary_path = tmp_path / "execution_summary_20260703_123000.json"
+        summary_payload = [
+            {
+                "account_id": "123456789012",
+                "account_name": "Acme",
+                "command": "sts get-caller-identity",
+                "status": "SUCCESS",
+                "timestamp": "2026-07-03T12:30:00",
+                "execution_time": 0.42,
+            },
+            {
+                "account_id": "210987654321",
+                "account_name": "Beta",
+                "command": "sts get-caller-identity",
+                "status": "ERROR",
+                "error": "AccessDenied",
+                "timestamp": "2026-07-03T12:30:01",
+                "execution_time": 0.73,
+            },
+        ]
+        summary_path.write_text(json.dumps(summary_payload), encoding="utf-8")
+
+        config_manager = MagicMock()
+        config_manager.get.return_value = str(tmp_path)
+        app = TUIApp(MagicMock(), config_manager)
+
+        records = app._load_saved_results()
+        assert len(records) == 1
+        assert records[0]["file_name"] == summary_path.name
+        assert records[0]["command"] == "sts get-caller-identity"
+        assert records[0]["total"] == 2
+        assert records[0]["success"] == 1
+        assert records[0]["failed"] == 1
