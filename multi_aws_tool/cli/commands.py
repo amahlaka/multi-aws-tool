@@ -137,7 +137,7 @@ def sanitize_profile_name_component(name: str) -> str:
     return sanitized
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.1.3")
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 @click.pass_context
 def cli(ctx: click.Context, verbose):
