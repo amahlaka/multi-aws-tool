@@ -15,6 +15,7 @@ from ..aws.account_manager import AccountManager, AccountManagerError
 from ..utils.validators import parse_account_list, sanitize_profile_name_component
 from ..utils.logging_config import setup_logging_from_config
 from ..models.config import MultiAWSConfig
+from .. import __version__
 from ..execution import execute, ExecutionError
 
 # Setup basic logging
@@ -132,7 +133,7 @@ def get_account_name(ctx, account_id):
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 @click.pass_context
 def cli(ctx: click.Context, verbose):
