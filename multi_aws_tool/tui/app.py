@@ -14,6 +14,8 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..utils.validators import sanitize_profile_name_component as _sanitize_profile_name_component
+
 # ─── Color pair indices ───────────────────────────────────────────────────────
 
 _CP_NORMAL   = 1  # Default text
@@ -43,14 +45,6 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len - 1] + '…'
-
-
-def _sanitize_profile_name_component(name: str) -> str:
-    """Sanitize a name component for use in AWS profile names."""
-    sanitized = name.replace(' ', '-').replace('_', '-').replace('.', '-')
-    sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '-')
-    sanitized = '-'.join(filter(None, sanitized.split('-')))
-    return sanitized
 
 
 # ─── TUIApp ───────────────────────────────────────────────────────────────────

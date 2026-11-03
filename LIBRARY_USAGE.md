@@ -222,39 +222,59 @@ power_user_accounts = [
 ]
 ```
 
-### Working with AWS Profiles
+### Profiles and boto3 Sessions
 ```python
-# Create profiles for specific accounts and roles
-account_manager.create_aws_profiles(
-    account_ids=["123456789012", "987654321098"],
-    role_names=["PowerUserAccess", "ReadOnlyAccess"]
-)
-
-# Use generated profile names
-for account in accounts.accounts:
-    profile_name = account.profile_name
-    print(f"Use: aws --profile {profile_name} sts get-caller-identity")
-```
-
-### Parallel Operations
-```python
-import concurrent.futures
 from multi_aws_tool import AccountManager
 
-def process_account(account):
-    """Process a single account"""
-    # Your account processing logic here
-    return f"Processed {account.name}"
+# profile_prefix should match the `general.prefix` config value
+manager = AccountManager("my-sso-session", "eu-west-1", profile_prefix="multi-aws")
 
-# Process accounts in parallel
-with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-    futures = [
-        executor.submit(process_account, account) 
-        for account in accounts.accounts
-    ]
-    
-    results = [future.result() for future in futures]
+# Resolve a profile name: the account's stored profile, or
+# "<prefix>-<account-name>-<role>" when a role is given.
+# Returns None unless the profile exists in ~/.aws/config.
+profile = manager.get_profile_name("123456789012", role="ReadOnlyAccess")
+
+# Ready-to-use boto3 session. Uses the profile when one exists; otherwise,
+# if a role is given, fetches temporary credentials straight from SSO
+# (GetRoleCredentials). Those credentials don't auto-refresh (~1h lifetime).
+session = manager.get_session("123456789012", role="ReadOnlyAccess", region="eu-west-1")
+print(session.client("sts").get_caller_identity()["Arn"])
 ```
+
+### Running Commands Across Accounts (`execute`)
+`execute()` is the library equivalent of `multi-aws run`. It returns a
+`MultiAWSExecutionSummary` instead of printing and writing files.
+
+```python
+from multi_aws_tool import execute, ExecutionError
+
+summary = execute(
+    "ec2 describe-instances --query 'Reservations[].Instances[].InstanceId'",
+    accounts=["123456789012", "987654321098"],   # IDs or Account objects
+    regions=["eu-west-1", "us-east-1"],           # str, list, "all", or None (config default)
+    parallel=True,
+    role="ReadOnlyAccess",                        # optional: pick the profile for this role
+    timeout=120,
+)
+
+print(f"{summary.successful_accounts}/{summary.total_accounts} succeeded")
+for result in summary.get_successful_results():
+    print(result.account_name, result.region, result.output_json())
+for result in summary.get_failed_results() + summary.get_timeout_results():
+    print(result.account_id, result.region, result.status, result.error)
+
+summary.save("~/.multi-aws/outputs/")  # optional; readable by OutputParser
+```
+
+Notes:
+- Each (account, region) pair is one result; the summary counters count pairs.
+- Unknown accounts and accounts without a usable profile produce `ERROR` results
+  rather than being skipped.
+- Destructive commands raise `ExecutionError` unless `allow_destructive=True`
+  or `allow-destructive-commands` is enabled in config.
+- Other options: `output_format`, `max_workers`, `dry_run`, `on_result`
+  (per-result callback, called from worker threads in parallel mode),
+  `account_manager`, `config_manager`.
 
 ## Integration Examples
 

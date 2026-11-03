@@ -117,6 +117,12 @@ multi-aws run 'ec2 describe-instances' --accounts all --parallel --save
 multi-aws run 'iam list-users' --team production --timeout 60
 ```
 
+**Commands with their own options** (quote the whole command, or put it after `--`):
+```bash
+multi-aws run "ec2 describe-instances --query 'Reservations[].Instances[].InstanceId'" --accounts 123456789012
+multi-aws run --accounts 123456789012 -- ec2 describe-instances --query 'Reservations[].Instances[].InstanceId'
+```
+
 **Dry run to see what would be executed**:
 ```bash
 multi-aws run 'ec2 terminate-instances --instance-ids i-1234567890abcdef0' --accounts 123456789012 --dry-run

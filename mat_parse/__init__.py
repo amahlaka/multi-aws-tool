@@ -9,7 +9,7 @@ Modules:
     iam: IAM credential report analysis and inactive user detection
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "MultiAWSTool Contributors"
 __description__ = "Parser collection for AWS MultiAWSTool outputs"
 

@@ -54,6 +54,7 @@ class AccountResult:
     execution_time: float = 0.0
     exit_code: Optional[int] = None
     output_file: Optional[str] = None  # Path to individual output file
+    region: Optional[str] = None
     
     @classmethod
     def from_command_result(cls, result: Any, account_name: str = None, 
@@ -88,6 +89,14 @@ class AccountResult:
     def has_error(self) -> bool:
         """Check if there is an error"""
         return bool(self.error and self.error.strip())
+    
+    def output_json(self) -> Any:
+        """Parse ``output`` as JSON (for commands run with ``--output json``).
+        
+        Raises:
+            json.JSONDecodeError: If the output is not valid JSON
+        """
+        return json.loads(self.output) if self.has_output() else None
 
 
 @dataclass 
@@ -129,9 +138,35 @@ class MultiAWSExecutionSummary:
         """Get result for specific account"""
         return next((r for r in self.results if r.account_id == account_id), None)
     
+    def get_results_by_region(self, region: str) -> List[AccountResult]:
+        """Get all results for a specific region"""
+        return [r for r in self.results if r.region == region]
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         return asdict(self)
+    
+    def save(self, path: Union[str, Path]) -> Path:
+        """
+        Write the summary as JSON (readable by :meth:`OutputParser.parse_execution_summary`).
+        
+        Args:
+            path: Target file, or a directory to write
+                ``execution_summary_<execution_id>.json`` into
+        
+        Returns:
+            Path of the written file
+        """
+        path = Path(path).expanduser()
+        if path.is_dir() or not path.suffix:
+            path.mkdir(parents=True, exist_ok=True)
+            path = path / f"execution_summary_{self.execution_id}.json"
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_directory = self.output_directory or str(path.parent)
+        with open(path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2, default=str)
+        return path
 
 
 class OutputParser:
@@ -225,7 +260,8 @@ class OutputParser:
             timestamp=data.get('timestamp', datetime.now().isoformat()),
             execution_time=float(data.get('execution_time', 0.0)),
             exit_code=data.get('exit_code'),
-            output_file=data.get('output_file')
+            output_file=data.get('output_file'),
+            region=data.get('region')
         )
     
     def parse_account_output(self, file_path: Union[str, Path]) -> Dict[str, Any]:

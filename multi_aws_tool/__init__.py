@@ -6,7 +6,7 @@ This package can be used as a library to manage AWS accounts and SSO authenticat
 in other Python projects.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 __author__ = "MultiAWSTool Team"
 __description__ = "Multi AWS tool for managing operations across multiple AWS accounts via SSO"
 
@@ -28,6 +28,9 @@ from .output import (
     parse_execution_summary,
     analyze_execution_summary
 )
+
+# Programmatic multi-account execution
+from .execution import execute, ExecutionError
 
 # Convenience imports for common use cases
 __all__ = [
@@ -54,6 +57,9 @@ __all__ = [
     'parse_execution_summary',
     'analyze_execution_summary',
     
+    # Execution
+    'execute',
+    
     # Utility classes
     'AccountDataManager',
     
@@ -62,4 +68,5 @@ __all__ = [
     'SSOAuthenticationError',
     'ConfigurationError',
     'AccountDataError',
+    'ExecutionError',
 ]

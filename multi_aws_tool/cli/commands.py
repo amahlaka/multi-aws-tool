@@ -7,13 +7,16 @@ import logging
 import sys
 from pathlib import Path
 import os
+import shutil
 
 # Import dependencies at module level
 from ..config.manager import load_or_create_config, ConfigurationError
 from ..aws.account_manager import AccountManager, AccountManagerError
-from ..utils.validators import parse_account_list
+from ..utils.validators import parse_account_list, sanitize_profile_name_component
 from ..utils.logging_config import setup_logging_from_config
 from ..models.config import MultiAWSConfig
+from .. import __version__
+from ..execution import execute, ExecutionError
 
 # Setup basic logging
 logging.basicConfig(
@@ -23,6 +26,14 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _terminal_columns(default: int = 120) -> int:
+    """Terminal width, or a default when stdout isn't a terminal (pipes, CI, cron)."""
+    try:
+        return os.get_terminal_size()[0]
+    except (OSError, ValueError):
+        return shutil.get_terminal_size((default, 24)).columns
 
 
 class AppContext:
@@ -37,10 +48,9 @@ class AppContext:
     def initialize(self, verbose=False):
         """Initialize the application context"""
         self.verbose = verbose
-        columns, lines = os.get_terminal_size()
+        columns = _terminal_columns()
         self.max_content_width = columns
         self.terminal_width = columns
-        print("SET SIZE:", columns)
         try:
             # Load configuration
             self.config_manager = load_or_create_config()
@@ -60,16 +70,17 @@ class AppContext:
             except Exception as e:
                 # Fallback to basic logging if config-based setup fails
                 logger.warning(f"Failed to setup logging from config, using defaults: {e}")
-                from utils.logging_config import setup_logging
+                from ..utils.logging_config import setup_logging
                 setup_logging(logging.DEBUG if verbose else logging.INFO)
             
             # Get config values
             sso_session = self.config_manager.get('general', 'sso-session', 'default')
             region = self.config_manager.get('general', 'region', 'us-east-1')
             account_file = self.config_manager.get('general', 'account-file', '~/.multi-aws/accounts.json')
+            prefix = self.config_manager.get('general', 'prefix', 'multi-aws')
             
             # Initialize account manager
-            self.account_manager = AccountManager(sso_session, region, account_file)
+            self.account_manager = AccountManager(sso_session, region, account_file, profile_prefix=prefix)
             
             if verbose:
                 logger.debug(f"Initialized with SSO session: {sso_session}, region: {region}")
@@ -121,23 +132,8 @@ def get_account_name(ctx, account_id):
         return account_id  # Return ID if any error occurs
 
 
-def sanitize_profile_name_component(name: str) -> str:
-    """
-    Sanitize a name component for use in AWS profile names.
-    
-    AWS profile names should contain only alphanumeric characters, hyphens, and underscores.
-    This function replaces spaces and other problematic characters with hyphens.
-    """
-    # Replace spaces, dots, and underscores with hyphens
-    sanitized = name.replace(' ', '-').replace('_', '-').replace('.', '-')
-    # Remove any characters that aren't alphanumeric or hyphens
-    sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '-')
-    # Remove consecutive hyphens and ensure no leading/trailing hyphens
-    sanitized = '-'.join(filter(None, sanitized.split('-')))
-    return sanitized
-
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 @click.pass_context
 def cli(ctx: click.Context, verbose):
@@ -145,7 +141,7 @@ def cli(ctx: click.Context, verbose):
     # Initialize application context
     ctx.ensure_object(AppContext)
     ctx.obj.verbose = verbose
-    columns, lines = os.get_terminal_size()
+    columns = _terminal_columns()
     ctx.max_content_width = columns
     ctx.terminal_width = columns
     ctx.obj.max_content_width = columns
@@ -174,9 +170,9 @@ def configure():
     
     # Import dependencies
     try:
-        from config.manager import ConfigManager
-        from config.manager import ConfigurationError
-        from models.config import MultiAWSConfig
+        from ..config.manager import ConfigManager
+        from ..config.manager import ConfigurationError
+        from ..models.config import MultiAWSConfig
     except ImportError as e:
         click.echo(f"❌ Import error: {e}", err=True)
         return
@@ -971,7 +967,7 @@ def clean_duplicates(dry_run, prefix_only):
     click.echo("🔍 Checking for duplicate profiles in AWS config")
     
     try:
-        from config.manager import load_or_create_config
+        from ..config.manager import load_or_create_config
         import configparser
         import os
         import shutil
@@ -1381,6 +1377,102 @@ def template_delete(ctx, name, confirm):
         logger.exception("Unexpected error while deleting template")
 
 
+def _command_name_parts(args):
+    """Service and operation (first two non-option arguments) of an AWS CLI command."""
+    parts = []
+    skip_next = False
+    for part in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if part.startswith('--'):
+            # Global options that take a value
+            if part in ['--profile', '--region', '--output', '--endpoint-url']:
+                skip_next = True
+            continue
+        parts.append(part)
+        if len(parts) >= 2:
+            break
+    return parts
+
+
+def _write_result_file(result, account, output_path, output_pattern, output_format):
+    """Write one result to a file named from the configured output pattern.
+
+    Pattern placeholders: !a=account id, !A=account name, !c=command, !S=service,
+    !C=operation, !d=date, !t=time, !s=timestamp, !r=role, !p=team, !R=region.
+
+    Returns:
+        Path of the written file
+    """
+    import json
+    import shlex
+    from datetime import datetime
+
+    started = datetime.fromisoformat(result.timestamp)
+    # Profile format: prefix-account-role
+    profile_parts = (result.profile_name or '').split('-')
+    role_name = profile_parts[-1] if len(profile_parts) > 2 else 'unknown'
+
+    name_parts = _command_name_parts(shlex.split(result.command))
+    command_name = ('-'.join(name_parts) if name_parts else 'unknown-command').replace('/', '_')
+
+    def clean(value):
+        return value.replace(' ', '_').replace('/', '_')
+
+    replacements = [
+        ('!a', account.id),
+        ('!A', clean(account.name)),
+        ('!c', command_name),
+        ('!d', started.strftime('%Y%m%d')),
+        ('!t', started.strftime('%H%M%S')),
+        ('!s', started.strftime('%Y%m%d_%H%M%S')),
+        ('!r', role_name),
+        ('!S', name_parts[0] if name_parts else 'unknown-service'),
+        ('!C', name_parts[1] if len(name_parts) > 1 else 'unknown-operation'),
+        ('!p', clean(account.product_team) if account.product_team else 'unknown-team'),
+        ('!R', result.region or 'unknown-region'),
+    ]
+    filename_base = output_pattern
+    for placeholder, value in replacements:
+        filename_base = filename_base.replace(placeholder, value)
+    filename = f"{filename_base}.{output_format}"
+
+    # Flag output that doesn't match the requested format
+    stdout = result.output or ''
+    try:
+        if output_format == 'json':
+            json.loads(stdout)
+        elif output_format in ('yaml', 'yml'):
+            import yaml
+            yaml.safe_load(stdout)
+    except Exception as e:
+        click.echo(f"⚠️  Warning: Output is not valid {output_format.upper()} for account {account.name}: {e}")
+        filename = f"{filename_base}-corrupted.{output_format}"
+
+    # The pattern may contain slashes to create subdirectories
+    file_path = os.path.join(output_path, filename)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'w') as f:
+        if result.status == 'SUCCESS':
+            f.write(stdout)
+        else:
+            f.write(f"ERROR: {result.error}\nSTDOUT: {stdout}")
+    return file_path
+
+
+def _legacy_summary_records(summary, accounts_by_id):
+    """Summary records in the list format written by earlier versions (read by mat-parse)."""
+    records = []
+    for r in summary.results:
+        account = accounts_by_id.get(r.account_id)
+        record = r.to_dict()
+        record['status'] = r.status.lower()
+        record['team'] = account.product_team if account and account.product_team else "N/A"
+        records.append(record)
+    return records
+
+
 @cli.command()
 @click.option('--accounts', help='Comma-separated account IDs or file path')
 @click.option('--team', help='Team name(s) to select accounts from')
@@ -1403,15 +1495,9 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
     for example: multi-aws run @my-template --accounts 123456789012
     """
     import subprocess
-    import os
     import json
+    import shlex
     from datetime import datetime
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    try:
-        from models.result import CommandResult, ResultStatus
-    except ImportError:
-        from ..models.result import CommandResult, ResultStatus
 
     try:
         config_manager = ctx.obj.config_manager or load_or_create_config()
@@ -1439,8 +1525,8 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
             if tmpl.description:
                 click.echo(f"   ({tmpl.description})")
 
-            # Expand the template command into a tuple of tokens
-            command = tuple(tmpl.command.split())
+            # Expand the template command into a tuple of tokens (shell rules, so quoted args survive)
+            command = tuple(shlex.split(tmpl.command))
 
             # Apply template overrides only when the user hasn't supplied them
             if tmpl.region and not region:
@@ -1466,6 +1552,10 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
                 save = tmpl.save
         else:
             _tmpl_output_format = None
+            # A single quoted argument ('ec2 describe-instances --query "..."') is
+            # split with shell rules; multiple arguments (after --) are used as-is.
+            if len(command) == 1:
+                command = tuple(shlex.split(command[0]))
 
         # ------------------------------------------------------------------
         # Security check: validate the resolved command
@@ -1485,7 +1575,6 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
         click.echo(f"Across accounts: {accounts}")
         click.echo(f"Selected team: {team}")
         click.echo("Using each account's configured profile")
-        print(ctx.max_content_width)
 
         if not accounts and not team and not tags:
             click.echo("❌ You must specify --accounts, --team, or --tag to select accounts", err=True)
@@ -1594,258 +1683,76 @@ def run(ctx: click.Context, command: tuple, accounts, team, tags, output_dir, re
             regions_to_run = [config_region]
 
         # Prepare output directory
+        output_path = None
         if output_dir:
             output_path = os.path.expanduser(output_dir)
-            os.makedirs(output_path, exist_ok=True)
-            click.echo(f"💾 Output will be saved to: {output_path}")
-        elif save: # use the default save location from the configfile
+        elif save:  # use the default save location from the config file
             output_path = os.path.expanduser(config_manager.get('output', 'path'))
+        if output_path:
             os.makedirs(output_path, exist_ok=True)
             click.echo(f"💾 Output will be saved to: {output_path}")
 
-        
-        command_list = list(command)
+        accounts_by_id = {acc.id: acc for acc in valid_accounts}
 
-        def execute_command_for_account(account, region):
-            """Execute command for a single account and region using its configured profile"""
-            profile_name = account.profile_name
+        def report_result(result):
+            """Print (and optionally save) each result as it completes."""
+            account = accounts_by_id[result.account_id]
+            label = f"{account.name} ({result.region})"
 
-            if not profile_name:
-                click.echo(f"❌ {account.name}: No profile configured")
-                return CommandResult(
-                    account_id=account.id,
-                    command=command,
-                    status=ResultStatus.ERROR,
-                    output="",
-                    error="No profile configured for this account",
-                    timestamp=datetime.now(),
-                    execution_time=0
-                )
-            aws_command = [
-                'aws', '--profile', profile_name,
-                '--region', region,
-                '--output', output_format,
-            ]
-            for cmd_part in command_list:
-                if ' ' in cmd_part:
-                    cmd_part = f'"{cmd_part}"'
-                aws_command.append(cmd_part)
+            if dry_run:
+                click.echo(f"🔄 {label}: {result.error}")
+                return
 
-            start_time = datetime.now()
-            
-            try:
-                click.echo(f"🔄 Executing on {account.name} ({account.id}) in {region}...")
-                if dry_run:
-                    click.echo(f"   Dry run: {' '.join(aws_command)}")
-                    return CommandResult(
-                        account_id=account.id,
-                        command=command,
-                        status=ResultStatus.SUCCESS,
-                        output="",
-                        error="Dry run - command not executed",
-                        timestamp=start_time,
-                        execution_time=0
-                    )
-                
-                # Execute command
-                result = subprocess.run(
-                    aws_command,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout
-                )
-                
-                end_time = datetime.now()
-                duration = (end_time - start_time).total_seconds()
-                
-                # Create result object
-                command_result = CommandResult(
-                    account_id=account.id,
-                    command=command,
-                    team=account.product_team if account.product_team else "N/A",
-                    status=ResultStatus.SUCCESS if result.returncode == 0 else ResultStatus.ERROR,
-                    output=result.stdout,
-                    error=result.stderr,
-                    timestamp=start_time,
-                    execution_time=duration
-                )
-                
-                # Save output to file if specified
-                if output_dir or save:
-                    timestamp_str = start_time.strftime('%Y%m%d_%H%M%S')
-                    date_str = start_time.strftime('%Y%m%d')
-                    time_str = start_time.strftime('%H%M%S')
-                    
-                    # Extract role from profile name for filename (profile format: prefix-account-role)
-                    profile_parts = profile_name.split('-')
-                    role_name = profile_parts[-1] if len(profile_parts) > 2 else 'unknown'
-                    
-                    # Extract only the command name (first part) without parameters
-                    command_parts = command_list
-                    # Skip AWS CLI global options and get the service and operation
-                    command_name_parts = []
-                    skip_next = False
-                    
-                    for part in command_parts:
-                        if skip_next:
-                            skip_next = False
-                            continue
-                        
-                        # Skip AWS CLI global options
-                        if part.startswith('--'):
-                            # Some options have values, so we need to skip the next part too
-                            if part in ['--profile', '--region', '--output', '--endpoint-url']:
-                                skip_next = True
-                            continue
-                        
-                        # This should be service and operation (e.g., 'securityhub', 'get-findings')
-                        command_name_parts.append(part)
-                        
-                        # Stop after getting service and operation (first two non-option parts)
-                        if len(command_name_parts) >= 2:
-                            break
-                    
-                    # Create clean command name for filename
-                    command_name = '-'.join(command_name_parts) if command_name_parts else 'unknown-command'
-                    command_name = command_name.replace('/', '_')  # Replace any slashes
-                    
-                    # Generate filename using configurable pattern
-                    # Pattern placeholders: !a=account_id, !A=account_name, !c=command, !d=date, !t=time, !s=timestamp, !r=role
-                    # Default pattern: '!A-!c-!d' (account_name-command-date)
-                    filename_base = output_pattern
-                    filename_base = filename_base.replace('!a', account.id)
-                    filename_base = filename_base.replace('!A', account.name.replace(' ', '_').replace('/', '_'))
-                    filename_base = filename_base.replace('!c', command_name)
-                    filename_base = filename_base.replace('!d', date_str)
-                    filename_base = filename_base.replace('!t', time_str)
-                    filename_base = filename_base.replace('!s', timestamp_str)
-                    filename_base = filename_base.replace('!r', role_name)
-                    filename_base = filename_base.replace('!S', command_name_parts[0] if command_name_parts else 'unknown-service')
-                    filename_base = filename_base.replace('!C', command_name_parts[1] if len(command_name_parts) > 1 else 'unknown-operation')
-                    filename_base = filename_base.replace('!p', account.product_team.replace(' ', '_').replace('/', '_') if account.product_team else 'unknown-team')
-                    filename_base = filename_base.replace('!R', region)
-                    filename = f"{filename_base}.{output_format}"
-                    
-                    #If format is set, validate that the data is in that format
-                    if output_format == 'json':
-                        try:
-                            json.loads(result.stdout)
-                        except json.JSONDecodeError as e:
-                            click.echo(f"⚠️  Warning: Output is not valid JSON for account {account.name}: {e}")
-                            # Add "-corrupted" suffix to filename
-                            filename = f"{filename_base}-corrupted.{output_format}"
-                    elif output_format == 'yaml' or output_format == 'yml':
-                        try:
-                            import yaml
-                            yaml.safe_load(result.stdout)
-                        except Exception as e:
-                            click.echo(f"⚠️  Warning: Output is not valid YAML for account {account.name}: {e}")
-                            # Add "-corrupted" suffix to filename
-                            filename = f"{filename_base}-corrupted.{output_format}"
-                    
+            if output_path and result.exit_code is not None:
+                file_path = _write_result_file(result, account, output_path,
+                                               output_pattern, output_format)
+                result.output_file = file_path
 
+            if result.status == 'SUCCESS':
+                click.echo(f"✅ {label}: Command completed successfully")
+                if verbose and result.has_output():
+                    out = result.output
+                    click.echo(f"📄 Output:\n{out[:500]}{'...' if len(out) > 500 else ''}")
+            elif result.status == 'TIMEOUT':
+                click.echo(f"⏰ {label}: Command timed out after {timeout}s")
+            else:
+                click.echo(f"❌ {label}: Command failed")
+                click.echo(f"📄 Error: {result.error}")
 
-                    # Filename base might contain also slashes, this is to allow subdirectories, check and create them
-                    if '/' in filename:
-                        subdir = os.path.dirname(filename)
-                        full_subdir_path = os.path.join(output_path, subdir)
-                        os.makedirs(full_subdir_path, exist_ok=True)
-                    file_path = os.path.join(output_path, filename)
-                    
-                    with open(file_path, 'w') as f:
-                        if result.returncode == 0:
-                            f.write(result.stdout)
-                        else:
-                            f.write(f"ERROR: {result.stderr}\nSTDOUT: {result.stdout}")
-                
-                if result.returncode == 0:
-                    click.echo(f"✅ {account.name}: Command completed successfully")
-                    if verbose and result.stdout.strip():
-                        click.echo(f"📄 Output:\n{result.stdout[:500]}{'...' if len(result.stdout) > 500 else ''}")
-                else:
-                    click.echo(f"❌ {account.name}: Command failed")
-                    click.echo(f"📄 Error: {result.stderr}")
-                
-                return command_result
-                
-            except subprocess.TimeoutExpired:
-                end_time = datetime.now()
-                duration = (end_time - start_time).total_seconds()
-                
-                click.echo(f"⏰ {account.name}: Command timed out after {timeout}s")
-                
-                return CommandResult(
-                    account_id=account.id,
-                    command=command,
-                    status=ResultStatus.TIMEOUT,
-                    output="",
-                    error=f"Command timed out after {timeout} seconds",
-                    timestamp=start_time,
-                    execution_time=duration
-                )
-                
-            except Exception as e:
-                end_time = datetime.now()
-                duration = (end_time - start_time).total_seconds()
-                
-                click.echo(f"💥 {account.name}: Execution error: {e}")
-                #also print the stack trace to the log
-                logger.exception(f"Execution error for account {account.name} ({account.id})")
-                
-                return CommandResult(
-                    account_id=account.id,
-                    command=command,
-                    status=ResultStatus.ERROR,
-                    output="",
-                    error=str(e),
-                    timestamp=start_time,
-                    execution_time=duration
-                )
-        
-        # Execute commands
-        execution_pairs = [(account, rgn) for account in valid_accounts for rgn in regions_to_run]
-        results = []
+        mode = "in parallel" if parallel else "sequentially"
+        click.echo(f"🚀 Executing commands {mode} across {len(valid_accounts)} account(s) "
+                   f"and {len(regions_to_run)} region(s)...")
 
-        if parallel and len(execution_pairs) > 1:
-            click.echo(f"🚀 Executing commands in parallel across {len(valid_accounts)} account(s) and {len(regions_to_run)} region(s)...")
+        summary = execute(
+            list(command),
+            valid_accounts,
+            regions=regions_to_run,
+            parallel=parallel,
+            timeout=timeout,
+            output_format=output_format,
+            allow_destructive=allow_destructive,
+            dry_run=dry_run,
+            account_manager=account_manager,
+            config_manager=config_manager,
+            on_result=report_result,
+        )
 
-            with ThreadPoolExecutor(max_workers=min(len(execution_pairs), 10)) as executor:
-                future_to_pair = {
-                    executor.submit(execute_command_for_account, account, rgn): (account, rgn)
-                    for account, rgn in execution_pairs
-                }
-
-                for future in as_completed(future_to_pair):
-                    result = future.result()
-                    results.append(result)
-        else:
-            click.echo(f"📋 Executing commands sequentially across {len(valid_accounts)} account(s) and {len(regions_to_run)} region(s)...")
-
-            for account, rgn in execution_pairs:
-                result = execute_command_for_account(account, rgn)
-                results.append(result)
-        
-        # Summary
-        successful = sum(1 for r in results if r.status == ResultStatus.SUCCESS)
-        failed = sum(1 for r in results if r.status == ResultStatus.ERROR)
-        timeouts = sum(1 for r in results if r.status == ResultStatus.TIMEOUT)
-        
         click.echo(f"\n📊 Execution Summary:")
-        click.echo(f"  ✅ Successful: {successful}")
-        click.echo(f"  ❌ Failed: {failed}")
-        click.echo(f"  ⏰ Timeouts: {timeouts}")
-        click.echo(f"  📋 Total: {len(results)}")
-        
-        if output_dir or save:
+        click.echo(f"  ✅ Successful: {summary.successful_accounts}")
+        click.echo(f"  ❌ Failed: {summary.failed_accounts}")
+        click.echo(f"  ⏰ Timeouts: {summary.timeout_accounts}")
+        click.echo(f"  📋 Total: {summary.total_accounts}")
+
+        if output_path:
             click.echo(f"\n💾 All outputs saved to: {output_path}")
-        
-        # Save results summary
-        if output_dir or save:
-            summary_file = os.path.join(output_path, f"execution_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            summary_file = os.path.join(
+                output_path, f"execution_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(summary_file, 'w') as f:
-                json.dump([r.to_dict() for r in results], f, indent=2, default=str)
+                json.dump(_legacy_summary_records(summary, accounts_by_id), f, indent=2, default=str)
             click.echo(f"📋 Summary saved to: {summary_file}")
-        
+
+    except ExecutionError as e:
+        click.echo(f"❌ {e}", err=True)
     except AccountManagerError as e:
         click.echo(f"❌ Command execution error: {e}", err=True)
     except (OSError, IOError) as e:
@@ -2245,7 +2152,7 @@ def cleanup(profiles, tokens, accounts, all, confirm):
         return
     
     try:
-        from config.manager import load_or_create_config
+        from ..config.manager import load_or_create_config
         import os
         import shutil
         
