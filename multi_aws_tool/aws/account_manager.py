@@ -4,13 +4,17 @@ Handles AWS account discovery, role enumeration, and account data management
 """
 
 import logging
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set, Union
 from datetime import datetime
+
+import boto3
+import botocore.session
 
 from .sso_client import SSOClient, SSOAuthenticationError
 from .organizations_client import OrganizationsClient, OrganizationsAccessError
 from ..models.account import Account, AccountCollection, AccountStatus, Role
 from ..utils.account_data import AccountDataManager, AccountDataError
+from ..utils.validators import build_profile_name
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ class AccountManager:
     """Manages AWS accounts, roles, and their data persistence"""
     
     def __init__(self, sso_session_name: str = "default", region: str = "us-east-1", 
-                 account_file_path: Optional[str] = None):
+                 account_file_path: Optional[str] = None, profile_prefix: str = "multi-aws"):
         """
         Initialize account manager
         
@@ -29,7 +33,11 @@ class AccountManager:
             sso_session_name: SSO session name for authentication
             region: AWS region for SSO operations
             account_file_path: Optional custom path for account data file
+            profile_prefix: Prefix used for generated AWS CLI profiles
+                (the ``general.prefix`` config value)
         """
+        self.region = region
+        self.profile_prefix = profile_prefix
         self.sso_client = SSOClient(sso_session_name, region)
         self.data_manager = AccountDataManager(account_file_path)
         
@@ -389,6 +397,102 @@ class AccountManager:
             f"{failed} failed"
         )
         return {'synced': synced, 'skipped': skipped, 'failed': failed}
+    
+    # ------------------------------------------------------------------
+    # Profiles and boto3 sessions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _available_profiles() -> Set[str]:
+        """Profiles currently defined in the AWS config/credentials files."""
+        return set(botocore.session.Session().available_profiles)
+
+    def get_profile_name(self, account_id: Union[str, Account], role: Optional[str] = None) -> Optional[str]:
+        """
+        Resolve the AWS CLI profile name for an account (and optionally a role).
+
+        Without ``role`` the account's stored profile is returned. With ``role``,
+        the stored profile is used if it was generated for that role, otherwise
+        the conventional ``<prefix>-<account-name>-<role>`` name is tried.
+        Only profiles that actually exist in the AWS config are returned.
+
+        Args:
+            account_id: AWS account ID (or an :class:`Account` object)
+            role: Optional SSO role (permission set) name
+
+        Returns:
+            The profile name, or None if no matching profile is configured
+        """
+        account = account_id if isinstance(account_id, Account) else self.get_account(account_id)
+        if not account:
+            return None
+
+        candidates: List[str] = []
+        if account.profile_name and (role is None or account.profile_name.endswith(f"-{role}")):
+            candidates.append(account.profile_name)
+        if role:
+            candidates.append(build_profile_name(self.profile_prefix, account.name, role))
+
+        available = self._available_profiles()
+        return next((name for name in candidates if name in available), None)
+
+    def get_session(self, account_id: str, role: Optional[str] = None,
+                    region: Optional[str] = None) -> boto3.Session:
+        """
+        Get a ready-to-use boto3 session for an account.
+
+        Uses the account's configured AWS CLI profile when one exists (see
+        :meth:`get_profile_name`), so credentials refresh through the normal
+        SSO profile flow. If no profile is configured and ``role`` is given,
+        temporary credentials are fetched directly from SSO
+        (``GetRoleCredentials``); these do not auto-refresh.
+
+        Args:
+            account_id: AWS account ID
+            role: Optional SSO role name (required when the account has no profile)
+            region: Region for the session; defaults to the manager's region
+
+        Returns:
+            A configured ``boto3.Session``
+
+        Raises:
+            AccountManagerError: If the account is unknown or no credentials
+                can be obtained
+        """
+        region = region or self.region
+        account = self.get_account(account_id)
+        if not account:
+            raise AccountManagerError(
+                f"Account {account_id} not found in local data. Run account discovery first."
+            )
+
+        profile_name = self.get_profile_name(account, role)
+        if profile_name:
+            return boto3.Session(profile_name=profile_name, region_name=region)
+
+        if not role:
+            raise AccountManagerError(
+                f"No AWS profile configured for account {account_id} ({account.name}). "
+                "Generate one with 'multi-aws profiles' or pass a role name."
+            )
+
+        try:
+            creds = self.sso_client._get_sso_client().get_role_credentials(
+                roleName=role,
+                accountId=account_id,
+                accessToken=self.sso_client.get_access_token(),
+            )['roleCredentials']
+        except Exception as e:
+            raise AccountManagerError(
+                f"Failed to get SSO credentials for role '{role}' in account {account_id}: {e}"
+            ) from e
+
+        return boto3.Session(
+            aws_access_key_id=creds['accessKeyId'],
+            aws_secret_access_key=creds['secretAccessKey'],
+            aws_session_token=creds['sessionToken'],
+            region_name=region,
+        )
     
     def is_authenticated(self) -> bool:
         """Check if SSO is authenticated"""

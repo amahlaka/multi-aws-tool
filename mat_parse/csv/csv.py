@@ -23,6 +23,10 @@ def extract_csv_from_execution_summary(execution_summary_path: Path, output_dire
     with execution_summary_path.open('r') as f:
         summary_data = json.load(f)
     
+    # Accept both the CLI's list format and MultiAWSExecutionSummary.save() output
+    if isinstance(summary_data, dict):
+        summary_data = summary_data.get('results', [])
+    
     # Process each command result
     for result in summary_data:
         account_id = result.get('account_id')

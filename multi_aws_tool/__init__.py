@@ -29,6 +29,9 @@ from .output import (
     analyze_execution_summary
 )
 
+# Programmatic multi-account execution
+from .execution import execute, ExecutionError
+
 # Convenience imports for common use cases
 __all__ = [
     # Main management classes
@@ -54,6 +57,9 @@ __all__ = [
     'parse_execution_summary',
     'analyze_execution_summary',
     
+    # Execution
+    'execute',
+    
     # Utility classes
     'AccountDataManager',
     
@@ -62,4 +68,5 @@ __all__ = [
     'SSOAuthenticationError',
     'ConfigurationError',
     'AccountDataError',
+    'ExecutionError',
 ]

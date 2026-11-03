@@ -105,8 +105,12 @@ class ExecutionSummaryProcessor:
             
             print(f"Processing execution summary: {self.execution_summary_file.name}")
             
+            # Accept both the CLI's list format and MultiAWSExecutionSummary.save() output
+            if isinstance(execution_data, dict):
+                execution_data = execution_data.get('results', [])
+            
             for entry in execution_data:
-                if (entry.get('status') == 'success' and 
+                if (str(entry.get('status', '')).lower() == 'success' and 
                     entry.get('command') == 'iam get-credential-report' and
                     entry.get('output')):
                     
