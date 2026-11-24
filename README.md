@@ -29,11 +29,15 @@ the commands (`multi-aws`, `multi-aws-mcp`, `mat-parse`) on your PATH:
 # Install uv if you don't have it (or: curl -LsSf https://astral.sh/uv/install.sh | sh)
 brew install uv
 
-uv tool install multi-aws-tool
+uv tool install --python 3.12 multi-aws-tool
 ```
 
-[pipx](https://pipx.pypa.io/) works the same way: `pipx install multi-aws-tool` (add
-`--python python3.12` if your default Python is older than 3.11).
+Keep the `--python 3.12` (any version from 3.11 up works). Without it, uv uses the Python it finds
+first, such as an active conda environment or an older system Python. On Python 3.10 or older,
+it then silently installs an old 0.1.x release that lacks `setup` and the MCP server. uv
+downloads Python 3.12 itself if you don't have it.
+
+[pipx](https://pipx.pypa.io/) works the same way: `pipx install --python python3.12 multi-aws-tool`.
 
 Then run the guided setup:
 
@@ -415,8 +419,15 @@ uv tool update-shell        # or: pipx ensurepath
 # then open a new terminal
 ```
 
-**`error: externally-managed-environment` from pip**: install with `uv tool install multi-aws-tool`
-or `pipx install multi-aws-tool`, or into a virtual environment (see [Installation](#installation)).
+**`multi-aws --version` shows 0.1.x / `multi-aws setup` doesn't exist**: the tool was installed
+with a Python older than 3.11 (often an active conda environment), so an old release was picked.
+`uv tool upgrade` won't fix this. Reinstall with a newer Python instead:
+```bash
+uv tool install --force --python 3.12 multi-aws-tool
+```
+
+**`error: externally-managed-environment` from pip**: install with `uv tool install --python 3.12 multi-aws-tool`
+or `pipx install --python python3.12 multi-aws-tool`, or into a virtual environment (see [Installation](#installation)).
 
 **SSO Authentication Failed**:
 ```bash
@@ -472,7 +483,7 @@ python -m pytest
 To use your checkout as your everyday `multi-aws` command (changes apply without reinstalling):
 
 ```bash
-uv tool install --editable .
+uv tool install --python 3.12 --editable .
 ```
 
 ### Project Structure
