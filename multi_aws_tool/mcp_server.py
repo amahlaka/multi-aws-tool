@@ -8,7 +8,7 @@ stdio on your machine, so credentials never leave it.
 
 Install and register with Claude Desktop::
 
-    pip install 'multi-aws-tool[mcp]'
+    pip install multi-aws-tool
     multi-aws-mcp --install-claude-desktop
 
 Destructive commands follow the ``security.allow-destructive-commands`` config
@@ -252,27 +252,13 @@ def install_claude_desktop(config_path: Optional[Path] = None, name: str = SERVE
 # MCP server
 # ---------------------------------------------------------------------------
 
-def _import_sdk():
-    try:
-        from mcp.server.mcpserver import MCPServer as Server  # mcp >= 2
-    except ImportError:
-        try:
-            from mcp.server.fastmcp import FastMCP as Server  # mcp 1.x
-        except ImportError as e:
-            raise ImportError(
-                "The MCP server needs the 'mcp' package (Python >= 3.10). "
-                "Install it with: pip install 'multi-aws-tool[mcp]'"
-            ) from e
-    from mcp.types import ToolAnnotations
-    return Server, ToolAnnotations
-
-
 def build_server(config_manager: Optional[ConfigManager] = None):
     """Create the MCP server with all multi-aws tools registered."""
     import anyio
+    from mcp.server.mcpserver import MCPServer
+    from mcp.types import ToolAnnotations
 
-    Server, ToolAnnotations = _import_sdk()
-    server = Server(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+    server = MCPServer(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
 
     def load():
         # Reload on each call so config/account changes made via the CLI are picked up.

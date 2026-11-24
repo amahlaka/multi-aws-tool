@@ -17,7 +17,7 @@ A command-line tool for managing multiple AWS accounts through AWS SSO. Execute 
 
 ### Option 1: Install as Package (Recommended)
 
-Install MultiAWSTool as a Python package to get the `multi-aws` command:
+Requires Python 3.11 or newer. Install MultiAWSTool as a Python package to get the `multi-aws` command:
 
 ```bash
 # Clone the repository
@@ -274,10 +274,9 @@ For detailed library usage, see [LIBRARY_USAGE.md](LIBRARY_USAGE.md) and [OUTPUT
 `multi-aws-mcp` is a local [MCP](https://modelcontextprotocol.io) server (stdio) that lets
 Claude Desktop, Claude Code and other MCP clients run commands across your accounts with the
 same config, account data, SSO session and AWS CLI profiles as the `multi-aws` CLI. It runs on
-your machine; credentials never leave it. Requires Python 3.10+.
+your machine; credentials never leave it.
 
 ```bash
-pip install 'multi-aws-tool[mcp]'      # or: pip install -e '.[mcp]'
 multi-aws-mcp --install-claude-desktop # adds it to claude_desktop_config.json (keeps a .bak)
 ```
 

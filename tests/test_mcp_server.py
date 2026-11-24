@@ -123,11 +123,10 @@ class TestInstallClaudeDesktop:
 
 
 class TestServerTools:
-    """Exercise the registered tools through the MCP SDK (skipped if it isn't installed)."""
+    """Exercise the registered tools through the MCP SDK."""
 
     @pytest.fixture
     def server(self, manager, tmp_path):
-        pytest.importorskip("mcp")
         from multi_aws_tool import mcp_server
 
         config = ConfigManager(str(tmp_path / "config.ini"))
