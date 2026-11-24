@@ -109,15 +109,12 @@ class TemplateManager:
 
 def get_template_manager(config_manager=None) -> TemplateManager:
     """Create a TemplateManager, optionally using a config-provided path"""
+    templates_file = None
     if config_manager is not None:
         try:
-            templates_file = config_manager.get(
-                "general", "templates-file", fallback=None
-            )
-            if templates_file:
-                return TemplateManager(templates_file)
+            templates_file = config_manager.get("general", "templates-file", fallback=None)
         except Exception:
-            pass
-    manager = TemplateManager()
+            templates_file = None
+    manager = TemplateManager(templates_file or None)
     manager.load_templates()
     return manager

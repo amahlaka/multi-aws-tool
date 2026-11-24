@@ -79,6 +79,16 @@ echo "source ~/.multi-aws-completion.zsh" >> ~/.zshrc
 
 ## Quick Start
 
+The fastest way to get going is the guided setup. It checks the AWS CLI, adds your SSO session,
+logs you in, discovers your accounts, fetches roles, creates profiles, verifies access and
+optionally connects Claude Desktop. It's safe to re-run, because finished steps are skipped:
+
+```bash
+multi-aws setup
+```
+
+Or step by step:
+
 1. **Install the tool** (see Installation section above)
 
 2. **Configure the tool**:
@@ -132,6 +142,7 @@ multi-aws run 'ec2 terminate-instances --instance-ids i-1234567890abcdef0' --acc
 ## Commands
 
 ### Core Commands
+- **`setup`**: Guided first-time setup (SSO session, login, accounts, roles, profiles, Claude)
 - **`configure`**: Interactive setup of tool configuration
 - **`init`**: Initialize SSO authentication and discover AWS accounts
 - **`roles`**: Fetch available IAM roles for specified accounts
@@ -271,10 +282,11 @@ For detailed library usage, see [LIBRARY_USAGE.md](LIBRARY_USAGE.md) and [OUTPUT
 
 ## Using from Claude (MCP server)
 
-`multi-aws-mcp` is a local [MCP](https://modelcontextprotocol.io) server (stdio) that lets
-Claude Desktop, Claude Code and other MCP clients run commands across your accounts with the
-same config, account data, SSO session and AWS CLI profiles as the `multi-aws` CLI. It runs on
-your machine; credentials never leave it.
+`multi-aws-mcp` is a local [MCP](https://modelcontextprotocol.io) server (stdio) that gives
+Claude Desktop, Claude Code and other MCP clients the whole tool: onboarding, SSO, account
+discovery, roles, profiles, teams, tags, templates and running commands. It uses the same
+config, account data, SSO session and AWS CLI profiles as the `multi-aws` CLI, and runs on your
+machine, so credentials never leave it.
 
 ```bash
 multi-aws-mcp --install-claude-desktop # adds it to claude_desktop_config.json (keeps a .bak)
@@ -288,18 +300,27 @@ claude mcp add multi-aws -- multi-aws-mcp
 
 `multi-aws-mcp --print-config` prints the JSON entry if you'd rather edit the config yourself.
 
-Tools:
+**New users:** pick the **"Set up multi-aws"** prompt (`getting_started`) in Claude, or just ask
+"help me set up multi-aws". Claude checks what's missing and walks you through adding your SSO
+session, logging in, discovering accounts, fetching roles and creating profiles.
 
-| Tool | What it does |
-|------|--------------|
-| `get_status` | Config defaults, SSO login state, account counts and teams |
-| `list_accounts` | Accounts with team, tags, roles and profile; filter by team/tags/role/name |
-| `run_aws_command` | Runs an AWS CLI command across accounts (IDs, names, `all`, team, tags) and regions, optionally with a specific SSO role |
-| `sso_login` | Runs `aws sso login` for the configured session (opens your browser) |
+| Area | Tools |
+|------|-------|
+| Setup & status | `get_status` (setup checklist + next step), `get_config`, `update_config`, `list_sso_sessions`, `add_sso_session`, `sso_login` |
+| Accounts & roles | `discover_accounts`, `list_accounts`, `fetch_roles` |
+| Profiles | `generate_profiles`, `sync_profiles`, `sanitize_account_names`, `clean_duplicate_profiles` |
+| Teams & tags | `list_teams`, `assign_team`, `set_tags`, `remove_tags`, `sync_tags` |
+| Templates | `list_templates`, `save_template`, `delete_template`, `run_template` |
+| Running | `run_aws_command` |
+| Cleanup | `cleanup` (needs explicit confirmation) |
 
-Destructive commands follow `security.allow-destructive-commands` in your config; Claude cannot
-override it. Large outputs are truncated in the response and the full results are saved under
-`<output path>/mcp/`.
+Safety:
+- Destructive AWS commands follow `security.allow-destructive-commands` in your config. Claude can
+  neither override nor change that setting.
+- Every edit to `~/.aws/config` keeps a timestamped backup next to it, and existing profiles are
+  updated in place rather than duplicated. Bulk operations support `dry_run`.
+- Large command outputs are truncated in the response, and the full results are saved under
+  `<output path>/mcp/`.
 
 ## Output Structure
 
