@@ -4,19 +4,18 @@ MultiAWSTool can be used as a Python library in other projects to manage AWS acc
 
 ## Installation
 
-### From Source (Development)
-```bash
-# Clone the repository
-git clone <repository-url>
-cd MultiAWSTool
+Requires Python 3.11 or newer. Add it to your project's environment:
 
-# Install in development mode
-pip install -e .
+```bash
+pip install multi-aws-tool      # inside your project's virtual environment
+# or, with uv-managed projects:
+uv add multi-aws-tool
 ```
 
-### From PyPI (when published)
+To work against a local checkout instead:
+
 ```bash
-pip install multi-aws-tool
+pip install -e /path/to/multi-aws-tool
 ```
 
 ## Quick Start
@@ -384,8 +383,8 @@ def get_accounts():
 
 3. **Import Errors**
    ```bash
-   # Solution: Install in development mode
-   pip install -e .
+   # Solution: install the package into the environment your code runs in
+   pip install multi-aws-tool
    ```
 
-For more examples, see `example_usage.py` in the project root.
+For more examples, see [`examples/example_usage.py`](examples/example_usage.py).

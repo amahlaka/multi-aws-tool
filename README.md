@@ -15,48 +15,71 @@ A command-line tool for managing multiple AWS accounts through AWS SSO. Execute 
 
 ## Installation
 
-### Option 1: Install as Package (Recommended)
+**Requirements**
+- Python 3.11 or newer
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- Access to your organization's AWS IAM Identity Center (SSO) portal
 
-Requires Python 3.11 or newer. Install MultiAWSTool as a Python package to get the `multi-aws` command:
+### Recommended: install as a tool with uv (or pipx)
+
+[uv](https://docs.astral.sh/uv/) installs `multi-aws` into its own isolated environment and puts
+the commands (`multi-aws`, `multi-aws-mcp`, `mat-parse`) on your PATH:
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd MultiAWSTool
+# Install uv if you don't have it (or: curl -LsSf https://astral.sh/uv/install.sh | sh)
+brew install uv
 
-# Install in development mode (creates multi-aws command)
-pip install -e .
+uv tool install multi-aws-tool
+```
 
-# Or install from PyPI when published
+[pipx](https://pipx.pypa.io/) works the same way: `pipx install multi-aws-tool` (add
+`--python python3.12` if your default Python is older than 3.11).
+
+Then run the guided setup:
+
+```bash
+multi-aws setup
+```
+
+Upgrade or remove later with:
+
+```bash
+uv tool upgrade multi-aws-tool
+uv tool uninstall multi-aws-tool   # your config, account data and AWS profiles are kept
+```
+
+> **Why not `pip install multi-aws-tool`?** Homebrew's Python and most current Linux
+> distributions block `pip install` into the system Python and fail with
+> `error: externally-managed-environment` ([PEP 668](https://peps.python.org/pep-0668/)).
+> Use `uv tool` / `pipx` as above, or install into a virtual environment.
+
+### Alternative: install into a virtual environment with pip
+
+```bash
+python3.12 -m venv ~/.venvs/multi-aws
+source ~/.venvs/multi-aws/bin/activate
 pip install multi-aws-tool
-```
-
-After installation, you can use the `multi-aws` command directly:
-```bash
 multi-aws --help
-multi-aws configure
 ```
 
+The commands are only available while the environment is active. To use them anywhere,
+link them onto your PATH, e.g. `ln -s ~/.venvs/multi-aws/bin/multi-aws ~/.local/bin/`.
 
-### Option 2: Development Setup
+### Claude Desktop / Claude Code
 
-For development or if you prefer to run directly:
+After installing, connect the MCP server (see [Using from Claude](#using-from-claude-mcp-server)):
 
 ```bash
-# Clone and setup
-git clone <repository-url>
-cd MultiAWSTool
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run directly
-python main.py --help
+multi-aws-mcp --install-claude-desktop   # then restart Claude Desktop
+claude mcp add multi-aws -- multi-aws-mcp
 ```
+
+The Claude Desktop entry points at the Python environment the tool is installed in, so run
+`--install-claude-desktop` again if you reinstall it somewhere else.
+
+### From source
+
+To run the latest code from GitHub, or to contribute, see [Development](#development).
 
 ### Shell Completion Setup
 
@@ -387,12 +410,13 @@ pattern = !A-!R-!c-!s
 
 **Command not found after installation**:
 ```bash
-# Ensure the virtual environment is activated
-source venv/bin/activate
-
-# Or check if ~/.local/bin is in your PATH
-export PATH="$HOME/.local/bin:$PATH"
+# uv / pipx put commands in ~/.local/bin; add it to your PATH
+uv tool update-shell        # or: pipx ensurepath
+# then open a new terminal
 ```
+
+**`error: externally-managed-environment` from pip**: install with `uv tool install multi-aws-tool`
+or `pipx install multi-aws-tool`, or into a virtual environment (see [Installation](#installation)).
 
 **SSO Authentication Failed**:
 ```bash
@@ -433,41 +457,46 @@ multi-aws --verbose <command>
 ### Setting up Development Environment
 
 ```bash
-# Clone and setup
-git clone <repository-url>
-cd MultiAWSTool
+git clone https://github.com/amahlaka/multi-aws-tool.git
+cd multi-aws-tool
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Create a virtual environment (Python 3.11+) and install in editable mode with test deps
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 
-# Install in development mode
-pip install -e .
+# Run the tests
+python -m pytest
+```
 
-# Install development dependencies
-pip install -r requirements-dev.txt  # if available
+To use your checkout as your everyday `multi-aws` command (changes apply without reinstalling):
 
-# Run tests
-python -m pytest tests/  # if tests exist
+```bash
+uv tool install --editable .
 ```
 
 ### Project Structure
 
 ```
-MultiAWSTool/
+multi-aws-tool/
 ├── multi_aws_tool/           # Main package
-│   ├── __init__.py          # Package exports
-│   ├── main.py              # CLI entry point
-│   ├── output.py            # Output parsing module
-│   ├── aws/                 # AWS integration
-│   ├── cli/                 # Command-line interface
-│   ├── config/              # Configuration management
-│   ├── models/              # Data models
-│   └── utils/               # Utility functions
-├── examples/                # Usage examples
-├── pyproject.toml          # Package configuration
-├── requirements.txt        # Dependencies
-└── README.md              # This file
+│   ├── __init__.py           # Package exports
+│   ├── main.py               # CLI entry point (multi-aws)
+│   ├── services.py           # Shared operations used by the CLI, TUI and MCP server
+│   ├── mcp_server.py         # MCP server (multi-aws-mcp)
+│   ├── execution.py          # Library execute() API
+│   ├── output.py             # Output parsing module
+│   ├── aws/                  # AWS SSO, accounts, ~/.aws/config editing
+│   ├── cli/                  # Command-line interface and setup wizard
+│   ├── config/               # Configuration and templates
+│   ├── models/               # Data models
+│   ├── tui/                  # Terminal UI
+│   └── utils/                # Utility functions
+├── mat_parse/                # mat-parse output parser
+├── examples/                 # Usage examples
+├── tests/                    # Test suite
+├── pyproject.toml            # Package configuration and dependencies
+└── README.md                 # This file
 ```
 
 ## Contributing
