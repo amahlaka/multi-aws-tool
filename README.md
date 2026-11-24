@@ -11,6 +11,7 @@ A command-line tool for managing multiple AWS accounts through AWS SSO. Execute 
 - **Security Controls**: Built-in protection against destructive operations with configurable overrides
 - **Shell Completion**: Full shell completion support for bash, zsh, and fish
 - **Library Integration**: Import as a Python library for use in other tools and scripts
+- **MCP Server**: Use your accounts and profiles from Claude Desktop / Claude Code via a local MCP server
 
 ## Installation
 
@@ -267,6 +268,39 @@ print(f"Success rate: {summary.success_rate:.1f}%")
 ```
 
 For detailed library usage, see [LIBRARY_USAGE.md](LIBRARY_USAGE.md) and [OUTPUT_MODULE.md](OUTPUT_MODULE.md).
+
+## Using from Claude (MCP server)
+
+`multi-aws-mcp` is a local [MCP](https://modelcontextprotocol.io) server (stdio) that lets
+Claude Desktop, Claude Code and other MCP clients run commands across your accounts with the
+same config, account data, SSO session and AWS CLI profiles as the `multi-aws` CLI. It runs on
+your machine; credentials never leave it. Requires Python 3.10+.
+
+```bash
+pip install 'multi-aws-tool[mcp]'      # or: pip install -e '.[mcp]'
+multi-aws-mcp --install-claude-desktop # adds it to claude_desktop_config.json (keeps a .bak)
+```
+
+Restart Claude Desktop afterwards. For Claude Code:
+
+```bash
+claude mcp add multi-aws -- multi-aws-mcp
+```
+
+`multi-aws-mcp --print-config` prints the JSON entry if you'd rather edit the config yourself.
+
+Tools:
+
+| Tool | What it does |
+|------|--------------|
+| `get_status` | Config defaults, SSO login state, account counts and teams |
+| `list_accounts` | Accounts with team, tags, roles and profile; filter by team/tags/role/name |
+| `run_aws_command` | Runs an AWS CLI command across accounts (IDs, names, `all`, team, tags) and regions, optionally with a specific SSO role |
+| `sso_login` | Runs `aws sso login` for the configured session (opens your browser) |
+
+Destructive commands follow `security.allow-destructive-commands` in your config; Claude cannot
+override it. Large outputs are truncated in the response and the full results are saved under
+`<output path>/mcp/`.
 
 ## Output Structure
 
