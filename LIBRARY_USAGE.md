@@ -276,6 +276,29 @@ Notes:
   (per-result callback, called from worker threads in parallel mode),
   `account_manager`, `config_manager`.
 
+### High-level operations (`MultiAWS`)
+`multi_aws_tool.services.MultiAWS` bundles everything the CLI and MCP server do, returning plain
+dicts instead of printing. It's built from your config by default.
+
+```python
+from multi_aws_tool.services import MultiAWS
+
+ops = MultiAWS()
+print(ops.setup_status()["next_step"])          # onboarding checklist
+
+ops.discover_accounts()
+ids = ops.select_accounts(["all"])              # or names, team="core", tags={"env": "prod"}
+ops.fetch_roles(ids)
+ops.generate_profiles(ids, role="ReadOnlyAccess", dry_run=True)
+ops.assign_team(ops.select_accounts(tags={"env": "prod"}), "platform")
+ops.save_template("whoami", "sts get-caller-identity", team="platform")
+
+summary = ops.run(**ops.template_run_kwargs("whoami"))
+```
+
+Edits to `~/.aws/config` (honouring `AWS_CONFIG_FILE`) go through
+`multi_aws_tool.aws.profile_config`. It updates sections in place and keeps a timestamped backup.
+
 ## Integration Examples
 
 ### Django Integration

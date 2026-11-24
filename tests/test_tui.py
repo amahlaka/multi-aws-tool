@@ -376,7 +376,7 @@ class TestAccountDetailsActions:
         assert collection.get_account("123456789012").tags == {"env": "prod"}
         manager.data_manager.save_accounts.assert_called_once_with(collection)
 
-    def test_create_profiles_for_account_ids_writes_profile_and_updates_account(self, tmp_path):
+    def test_create_profiles_for_account_ids_writes_profile_and_updates_account(self, tmp_path, monkeypatch):
         account = _make_account(
             "123456789012", "Acme", roles=[Role("PowerUserAccess", "arn:aws:iam::123456789012:role/PowerUserAccess")]
         )
@@ -396,11 +396,11 @@ class TestAccountDetailsActions:
         app._collection = collection
 
         aws_config_path = tmp_path / "aws-config"
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(aws_config_path))
 
         with patch.object(app, "_prompt", return_value=""), \
              patch.object(app, "_confirm", return_value=True), \
-             patch.object(app, "_flash"), \
-             patch("os.path.expanduser", side_effect=lambda value: str(aws_config_path) if value == "~/.aws/config" else value):
+             patch.object(app, "_flash"):
             app._create_profiles_for_account_ids(["123456789012"], "PowerUserAccess")
 
         content = aws_config_path.read_text(encoding="utf-8")
